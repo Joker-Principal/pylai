@@ -1,0 +1,37 @@
+# asio-module
+
+把 standalone asio 包成 **C++20 modules** 的**薄封装层**；应用（`server/` 里的 HTTP 服务器 `pylai`）在其上实现。
+
+## 目录地图
+
+| 目录 | 职责 | 详见 |
+|---|---|---|
+| `standalone/` | **唯一职责**：asio → C++20 module 封装（target `asio-module`） | `standalone/README.md` |
+| `ports/` | vcpkg **overlay ports**（asio 1.38.2 由此提供） | `ports/README.md` |
+| `docs/` | 调研笔记与设计草稿（**是笔记，不是决策**） | `docs/README.md` |
+| `tools/` | 仓库内小工具（clice 启动器） | `tools/README.md` |
+| `boost/` | boost.asio 的 module 封装草稿（**当前未参与构建**） | `boost/README.md` |
+| `server/` | **应用层**：HTTP 服务器（可执行 `pylai`）、动态线程池、观测与自学习 | `server/README.md` |
+
+工作区**之外**但要经常查的目录（vcpkg 根等）→ `docs/vcpkg.md`。
+
+## 三类文档，分工明确
+
+| 类型 | 去哪 | 性质 |
+|---|---|---|
+| **规矩**（相对稳定） | `AGENTS.md` | 必须遵守 |
+| **目录职责**（该放什么） | 各目录的 `README.md` | 就近说明 |
+| **笔记**（会变，标了状态） | `docs/` | 随时可能被推翻 |
+
+## 快速开始
+
+构建（终端——**要读到输出就走这条路**）：
+
+```
+cmake --preset dev_llvm
+cmake --build --preset debug_llvm
+```
+
+也可以用 CMake Tools 触发配置 / 构建（状态栏按钮，或命令 `cmake.configure` / `cmake.build`）。
+但**命令本身不返回可读输出**：要看编译错误请走 **Problems 面板诊断**，要原始输出请走终端。
+理由与完整的"想做什么 → 走哪条路"对照表见 `AGENTS.md` §4。

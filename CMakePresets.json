@@ -1,0 +1,33 @@
+{
+    "$schema": "https://cmake.org/cmake/help/latest/_downloads/3e2d73bff478d88a7de0de736ba5e361/schema.json",
+    "version": 8,
+    "configurePresets": [
+        {
+            "name": "base",
+            "hidden": true,
+            "generator": "Ninja Multi-Config",
+            "binaryDir": "${fileDir}/build-${presetName}",
+            "cacheVariables": {
+                "CMAKE_CONFIGURATION_TYPES": "Debug;RelWithDebInfo;Release",
+                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "base_debug",
+            "hidden": true,
+            "configuration": "Debug"
+        },
+        {
+            "name": "base_relwithdeb",
+            "hidden": true,
+            "configuration": "RelWithDebInfo"
+        },
+        {
+            "name": "base_release",
+            "hidden": true,
+            "configuration": "Release"
+        }
+    ]
+}

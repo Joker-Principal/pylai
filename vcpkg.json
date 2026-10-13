@@ -1,0 +1,20 @@
+{
+    "name": "asio-module",
+    "version": "1.0.0",
+    "dependencies": [
+        {
+            "name": "asio",
+            "features": ["spawn", "ssl"]
+        },
+        {
+            "name": "boost-asio",
+            "features": ["spawn", "ssl"]
+        },
+        "openssl",
+        "liburing",
+        "llhttp",
+        "fmt",
+        "spdlog",
+        "plf-hive"
+    ]
+}
