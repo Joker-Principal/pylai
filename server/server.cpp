@@ -61,6 +61,8 @@ Server::Builder& Server::Builder::max_requests_per_connection(std::size_t count)
 
 Server Server::Builder::build() { return Server(std::move(settings), std::move(routes)); }
 
+Server Server::Builder::Configured::build() { return Server(std::move(settings_), std::move(routes_)); }
+
 Server::Builder Server::builder() { return Builder{}; }
 
 Server::Server(Settings settings, route::Router routes) : settings(std::move(settings)), routes(std::move(routes))

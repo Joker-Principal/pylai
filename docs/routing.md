@@ -41,30 +41,25 @@ auto server = pylai::Server::builder()
 | `Get<>` `Post<>` `Put<>` `Delete<>` `Head<>` `Options<>` `Patch<>` | 动词；尖括号里是 path pattern |
 | `Param<T>` / `Param<T, "name">` | 第 N 个 `Param<>` 吃 pattern 第 N 个**命名捕获**；写了名字就与对应位置的捕获名做编译期校对 |
 | 其它形参（如 `const http::Request&`） | 拿整个请求 |
-| `Builder::route_on(&app, &App::m...)` | 一次注册整包（**一棵**编译期定容的树 + 槽位表） |
+| `Builder::route_on(&app, &App::m...)` | 一次注册整包；**每个动词一棵**编译期定容的树（不是一棵） |
 
 **编译期会拦住**：pattern 语法不合法 · `Param<>` 个数 ≠ 命名捕获个数 · `Param<>` 名字与对应位置捕获名不一致。
 
 > ⚠️ **已知缺口**：`Param<int>` 目前用 `std::from_chars` 转换，**失败时静默取 0**（`/users/abc` → `id == 0`）。
 > 要回 400 得由 handler 自己判；该语义尚未定案（见 `http-server-plan.md` §11.2 D）。
 
-### 1.1 底层构件：`Pattern<>` 与 `Table<…>`
+### 1.1 编译期会拦下什么
 
-`Pattern<S>` 单独解析 / 校验一条 pattern；`Table<On<"METHOD", "…">…>` 把若干条凑在一起做**冲突检查**，冲突就编不过。
+| 情形 | 怎么报 |
+|---|---|
+| pattern 语法不合法 | 「路由声明：路径 pattern 语法不合法…」 |
+| `Param<>` 个数 ≠ 命名捕获个数 | 「路由声明：`Param<>` 的个数必须等于…」 |
+| `Param<>` 名字与对应位置的捕获名不一致 | 「路由声明：`Param` 的名字与路径里对应位置的捕获名不一致…」 |
+| 同一动词下两条路由会为同一路径争抢 | 编译错误里直接出现这两条 pattern（`ShadowedRoute<"…", "…">`） |
+| 写了两次 `route_on` | `no member named 'route_on'` —— `route_on` 之后返回的 builder 只剩 `build()` |
 
-```cpp
-using namespace pylai::route;
-
-inline constexpr auto users = Pattern<"/users/{id}/posts/{pid}">{};
-
-inline constexpr Table<
-	On<"GET", "/health">,
-	On<"GET", "/users/{id}">,
-	On<"POST", "/users">> api;
-```
-
-> 📌 这两个**不参与注册** —— 能让路径真正生效的入口只有 `Builder::route_on`。
-> `Router` 里存的是 `route_on` 装出来的路由组（见 `http-server-plan.md` §11.2 C）。
+> 📌 **一个 server 只能声明一组路由**（`route_on` 之后就没有 `route_on` 了）—— 所以跨组冲突根本不存在，不需要运行期检查。
+> 需要单独检查一条 pattern 时可以用 `Pattern<"…">`（`ok()` / `err` / `params()`），但它**不参与注册**。
 
 ---
 
@@ -83,6 +78,10 @@ inline constexpr Table<
 | 同一路由内重名 | 禁止 | `duplicate_param` |
 
 段与段之间恒为一个 `/`；`/` 是**段分隔符**，不属于任何段。
+
+> ⚠️ **不支持段内前后缀** —— 一段要么是**纯字面量**，要么是**整段参数**；`img-{id}.png` 这种"段内混写"写不出来。
+> 原因：段内参数会让"后缀不同"证明不了两条路由不相交（`img-a.png.jpg` 会**同时**命中 `img-{id}.png` 与 `img-{name}.jpg`），
+> 歧义无法在编译期消解 —— 详见 `http-server-plan.md` §11.2 A。
 
 ### 2.1 花括号的两个说明
 
@@ -186,14 +185,14 @@ chars(0)  →  param(1)  →  catch_all(2)  →  end_mark(3)
 
 | 情形 | 判定 | 例 |
 |---|---|---|
-| 公共前缀完全同形，**且等长** | ❌ **报错**（落在同一节点，后注册的会覆盖前一个） | `/a/b` + `/a/b`；`/a/{x}` + `/a/{y}`（同形异名）；`/files/` + `/files/{p...}` |
+| 公共前缀完全同形，**且等长** | ❌ **报错**（同一动词下同一条路径只能有一条） | `/a/b` + `/a/b`；`/a/{x}` + `/a/{y}`（同形异名）；`/files/` + `/files/{p...}` |
 | 分歧点是**字面量**（至少一侧） | ✅ 放行（字面量 rank 最高，谁赢一眼看得出） | `/a/{x}/c` + `/a/b/{y}` |
 | 分歧点是**两个通配符** | ❌ **报错**（没有字面量可定优先级） | `/a/{x}` + `/a/{y...}`；`/a/{y...}` + `/a/{$}` |
 | 两侧的段**根本对不上** | ✅ 放行（匹配集合不相交） | `/a` + `/b`；`/a/{x}` + `/a/{$}`（param 只吃非空段，`{$}` 只吃空段） |
 
-**method 维度**：冲突只在**同一 method 内**判定。`On<"", …>` 的**空 method = 不限定**，与任何 method 都算重叠。
+**method 维度**：冲突只在**同一 method 内**判定 —— `Get<"/a">` 与 `Post<"/a">` 不算冲突（各走各的树，见 §1.1）。
 
-报错形态是一个 `static_assert`，消息里会点名**是哪两条路由**冲突（clang 还会指出实例化点）。
+报错形态是一个**未定义模板的实例化**：编译错误里会直接出现这两条冲突的 pattern（`ShadowedRoute<"…", "…">`）。
 
 ## 6. 参数提取
 

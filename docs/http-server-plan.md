@@ -337,7 +337,7 @@ $\sigma$ = 争用项，$\kappa$ = 一致性项（**拐点后吞吐反而下降**
 
 | 阶段 | 内容 | 验证 |
 |---|---|---|
-| **0** | HTTP/1.1 基线：单 io_context + io_uring，固定线程数，keep-alive，**有界队列 + 在途上限 + 超时**（哪怕固定值）。**无指标、无自适应、无 TLS**。<br>🟡 **进行中（2026-10-12）**<br>✅ 已跑通：llhttp 解析（pipeline / 半包 / 400 / 431）、keep-alive、空闲与写超时、**取消传播**（每连接独立 `cancellation_signal` + `plf::hive` 注册表，见 `asio-notes.md` §7）、SIGINT 优雅停机、io_uring 后端（实测 `anon_inode:[io_uring]`）<br>❌ 尚差：**有界队列 / 准入控制**、**外部压测 60s 基线**<br>🟡 进行中：**响应与路由**（当前是解析结果回显，不是真正的 HTTP 语义） | 外部压测 60s 无泄漏无挂死，记录基线 |
+| **0** | HTTP/1.1 基线：单 io_context + io_uring，固定线程数，keep-alive，**有界队列 + 在途上限 + 超时**（哪怕固定值）。**无指标、无自适应、无 TLS**。<br>🟡 **进行中**<br>✅ 已跑通：llhttp 解析（pipeline / 半包 / 400 / 431）、keep-alive、空闲与写超时、**取消传播**（每连接独立 `cancellation_signal` + `plf::hive` 注册表，见 `asio-notes.md` §7）、SIGINT 优雅停机、io_uring 后端（实测 `anon_inode:[io_uring]`）、**声明式路由**（`route_on` + 编译期冲突检查 + 每 method 一棵树，见 §11.2 C）<br>❌ 尚差：**有界队列 / 准入控制**、**外部压测 60s 基线**、**请求体**（`Request` 还没有 `body`，llhttp 也没接 `on_body`）<br>🟡 进行中：405 的 `Allow` 头、HEAD / OPTIONS 自动应答（语义已定，见 §11.2 G） | 外部压测 60s 无泄漏无挂死，记录基线 |
 | **1** | **只测不调**：按 §4 的结论建在 "stream/请求" 层的指标；请求级直方图 + 计数器 + OS 侧；周期报告；**观测开销自测**；冻结模式 | 指标稳定；开销 < 1~2% |
 | **2** | 动态池：§5.4 上下界 + EWMA/死区/迟滞/冷却 + 护栏/限步/回滚/冻结。引入 TLS 作为可控 CPU 密集负载 | 阶跃负载收敛性；固定 N（含 2N）vs 动态；**CPU 密集 vs 阻塞型各跑一遍** |
 | **3** | **离线扫参 + 跨窗口累积**（利用允许停机维护）：维护窗口内重启扫参 → 归档 / 固化；指纹 + 版本化；冻结 / 重置 / 打印 | 第二次启动"进入良好区间所需时间"缩短；模型跨窗口改进（见 §7.2） |
@@ -444,7 +444,21 @@ auto server = pylai::Server::builder()
 | `{$}` | 保留：`/a/{$}` 只匹配 `/a/`，用来"钉住到此为止"（对应 Go 的 `{$}`） | 🟡 |
 | 百分号解码 | **逐段解码**；`%2F` **不作为段分隔符**（Go 1.22 行为） | 🟡 |
 | regex 路由 | **不做** | 🟡 |
-| 段内前后缀（`img-{id}.png`） | **不做** | 🟡 |
+| 段内前后缀（`img-{id}.png`） | **不做** —— 🔄 2026-10-13 重新评估后**仍不做**，理由见下 | 🟡 |
+
+> **段内前后缀为什么不做（2026-10-13 重新评估）**
+> 用户一度要求加上（"段内前后缀可能很有用"），语义也已定（一段内最多一个参数；**非贪婪**、失败再放宽；`{x...}` / `{$}` 不进段内）。
+> 但推冲突规则时发现了**无法静态消解**的歧义：
+>
+> | 两条路由 | 请求 | 结果 |
+> |---|---|---|
+> | `img-{id}.png` + `img-{name}.jpg` | `img-a.png.jpg` | **两条都命中**（前者 `id="a"`，后者 `name="a.png"`） |
+>
+> 根因是**段级安全性不可推广**：段级之所以安全，靠的是"**段文本不同 ⇒ 匹配集合不相交**"（段是对齐单位）；
+> 段内参数打破它 —— **参数可以跨过后缀**，于是"后缀字面量不同"再也证明不了不相交。
+> 只剩**前缀**还能分隔（且要**互不为前缀**，否则 `img-{x}` 与 `i{z}` 也会撞），那会把 `img-{id}.png` + `img-{name}.jpg` 这类组合一律拒掉 ——
+> 表达力没增加多少，规则却要分叉（"后缀更长者优先"在后缀等长时仍定不出序）。
+> **结论：不做。** 若将来真需要，从"前缀能分开"那一类用例重新评估。
 
 #### B. 匹配策略
 
@@ -457,16 +471,25 @@ auto server = pylai::Server::builder()
 
 > ⚠️ 最后一条的成立前提见 §F 风险 2。
 
-> **实现进度（2026-10-13 晚，`server/route.cppm`，1285 行 · 99 条 `static_assert`）**
+> **实现进度（2026-10-13 晚④，`server/route.cppm`，1391 行 · 104 条 `static_assert`）**
 > - **段级视图**（校验 + 参数提取）：`Segment` / `PatternView` / `Pattern<S>` / `params()` ✅
-> - **段级冲突检查**：`segments_disjoint` / `routes_conflict` / `RouteConflict` ✅
-> - **编译期路由表**：`On` @683 · `find_table_conflict` @691 · `Table` @707（**声明即校验**，冲突 → 编译错）✅
-> - **字符级压缩 radix**（运行期匹配）：`RadixKind` @318 · `RadixEdge` @326 · `RadixNode` @334 · `RadixTree` @342 · `Capture` @352 · `PieceCursor` @389 · `insert_pattern` @513 · `build` @597 · `match_at` @604 · `match` @665 ✅
-> - **位置注入 DSL**：`Verb` @730 · `Endpoint`/`Get…Patch` @758 · `Param` / `RouteOf` / `ParamCount` / `SlotOf` · `validate_route` @888 · `make_arg` / `make_handler` · `RouteGroup` @946 / `make_group` · `std::coroutine_traits` 特化 ✅
-> - 编译期用例：`selftest` · `conflict_selftest` · `table_selftest` · `match_selftest` · `dsl_selftest` ✅
+> - **段级冲突检查**：`segments_disjoint` / `routes_conflict` @287 / `RouteConflict` @306 / `find_table_conflict` @680 ✅
+> - **字符级压缩 radix**（运行期匹配）：`RadixKind` @320 · `RadixEdge` @328 · `RadixNode` @336 · `RadixTree` @344 · `Capture` @354 · `PieceCursor` @391 · `insert_pattern` @515 · `build` @599 · `match_at` @606 · `match` @667 ✅
+> - **每 method 一棵树** ✅（2026-10-13 晚②）：`SelectPatterns` @838 按动词筛 pattern → 每个动词一棵 `build_of()`；
+>   `VerbRoutes` @1033 / `add_verb_routes` / `make_routes` @1074（各树擦成闭包，类型各异也能同放一个 vector）
+>   —— `RouteGroup` 包装层**已删**（2026-10-13 晚③）：`Router` 直接持有 `std::vector<VerbRoutes>`（一个成员，不再是“装一个元素的 vector”）
+> - **位置注入 DSL**：`Verb` @706 · `Endpoint` @734 · `Param` @771 · `RouteOf` @808 · `validate_route` @928 · `make_arg` @969 · `make_handler` @1015 · `coroutine_traits` 特化 @1081 ✅
+> - **`pmf` 类型萃取改用 jk 的 `Callable`** ✅（2026-10-13 晚④）：`RouteOf<Pmf>` 不再手写偏特化，形参表由 `std::tuple` 换成 `TList`
+>   → **`ParamSlot` 那条递归整块删掉**（`SlotOf<i, L> = ParamCount<L::Slice<0, i>>`）。白拿 cv / ref / noexcept / 变参全组合
+>   （反证：旧写法对 `const` / `noexcept` 成员指针报 "implicit instantiation of undefined template" —— `.vscode/tmp/jk-callable-probe/old-trait.cpp`，`-DWHICH=1/2`）。
+>   ⚠️ 代价：`:route` 现在 `import jk;`（见 `modules.md`），且 `RouteOf<Pmf>::Params` 对外是 `JK::Meta::TList`。
+> - **组级冲突检查（已接线）** ✅：`GroupClash` @942 + `validate_group` @953；冲突时实例化未定义的 `ShadowedRoute<两条 pattern>`
+>   → **编译错误里直接点名**（实测：`ShadowedRoute<FixedString<7>{"/items"}, FixedString<7>{"/items"}>`）
+> - 编译期用例：`selftest` · `conflict_selftest`（含「同 pattern 不同 method 不算冲突」）· `match_selftest` · `dsl_selftest` ✅
+>   `Table` / `On` / `table_selftest` **已删** —— `validate_group` 把它接进了真实注册路径，独立的"手工路由表"没用了
 > - 验证通道：**`tools/clice query`**（`--fresh` = 先重索引/重编译再回答）。命名检查才用 `clice lint`。
 >   `.clang-tidy` 已用 `HeaderFilterRegex` + `ExcludeHeaderFilterRegex` 把范围收窄到本工作区。
-> - **未落地 🔍**：**每 method 一棵树**（现为**每组**一棵，动词混在同一棵树里）· 405 的 `Allow` 头 · 运行期重建/切换活跃集合 · `Param` 的**转换失败语义**（现 `from_chars` 失败静默给 0）
+> - **未落地 🔍**：405 的 `Allow` 头 · HEAD / OPTIONS 自动应答（**语义已定**，见 §G）· 运行期重建/切换活跃集合 · `Param` 的**转换失败语义**（现 `from_chars` 失败静默给 0）
 
 #### C. 结构与实现
 
@@ -486,19 +509,36 @@ auto server = pylai::Server::builder()
 > 也就避免了"模板定义必须搬回 `.cppm`"的连锁反应。
 
 > **落地进度（2026-10-13 晚，已跑通）✅ —— 修订：本节先前记的"未落地"已作废**
-> - **接线**：`Router::add_group` + `dispatch`（组匹配 → 动词核对 → 405/404）（`server/route.cpp`）；
->   `Builder::route_on` = `validate_route` 折叠 + `add_group(make_group(...))`（`server/server.cppm`）。
+> - **接线**：`Router::set_routes` + `dispatch`（先试请求动词那棵树 → 否则 405/404）（`server/route.cpp`）；
+>   `Builder::route_on` = `validate_route` 折叠 + `validate_group` + `set_routes(make_routes(...))`（`server/server.cppm`）。
 > - **只留一种注册方式**（2026-10-13）：旧字符串 API（`Router::add/get/post/put` + 精确表 + `operator""_route` UDL）已删；
 >   `dispatch` 不再有"精确表"那两步。
+> - **每 method 一棵树**（2026-10-13 晚②）✅ —— 实测过：所有路由进同一棵树时 `Get<"/items">` 与 `Post<"/items">`
+>   会落到同一节点互相覆盖（`GET /items` 变 405、`POST /items` 变 200）。现在按动词分开建树，`tests/http_e2e.py` 有这两条断言钉住。
+> - **一个 builder 只允许一次 `route_on`**（2026-10-13 晚②）✅ —— 编译期：`route_on` 返回的 `Builder::Configured` 只有 `build()`，
+>   于是"声明两组路由"编不过、跨组冲突不存在；组内冲突由 `validate_group` 在注册点**点名两条 pattern** 拦下。
 > - **协程返回类型**：`Endpoint` 能当协程返回类型靠 `route.cppm` 尾部的 `coroutine_traits` 特化 →
 >   `standalone/asio.cppm` 因此导出 `asio::detail::awaitable_frame`。
-> - **端到端已验证** ✅：`tests/http_e2e.py`（裸 socket，避开 curl 的环境变量）发 7 个请求全过 ——
->   `/users/42 → user id=42`（位置注入生效）· `POST /submit/7`（同组另一动词）· `POST /health → 405` ·
->   `/nope` 与 `/echo → 404`。复核：`cmake --build --preset debug_llvm` → `./tests/run.sh`
->   （2026-10-13 起：示例应用与脚本已从 `.vscode/tmp/route-dsl-probe/` 搬进 `tests/`）。
+> - **端到端已验证** ✅：`tests/http_e2e.py`（裸 socket，避开 curl 的环境变量）发 9 个请求全过 ——
+>   `/users/42 → user id=42`（位置注入生效）· `GET /items` 与 `POST /items`（**同路径两动词各走各的**）·
+>   `POST /health → 405` · `/nope` 与 `/echo → 404`。复核：`cmake --build --preset debug_llvm` → `./tests/run.sh`。
 > - **已知缺口** 🔍：`/users/abc → user id=0`（`from_chars` 失败静默给 0 → 需要 400 路径）；
 >   `make_handler` 擦除后**没有捕获通道**，只能按本条 pattern **再匹配一次**（正确但冗余）。
-
+> - **三层级分工**（2026-10-13 讨论结论）：`Pattern` = **单条 route** 的语法扫描（产段）· `PieceCursor` = **变换**（段序列 → 片段序列，
+>   **不是**第二个解析器 —— 它消费 `Pattern` 的 `kind`/`text`，一个字都不重新判类型）· `insert_pattern` = **跨所有 route** 的合并（产 label）。
+>   三者输入不同 ⇒ 分三份实现是**层级划分**，不是重复。真正多余的只有 `Segment::pos` / `raw_len`（只为"事后回折"存在）。
+> - **「先算后建」是权宜，不是规范**：`std::vector` 不能进 `constexpr` 变量 ⇒ 只能定容 `std::array` ⇒ 只能先数后建。
+>   备选是"**数组长度进类型**"（实验：`.vscode/tmp/route-digest/pieces_by_type.cpp`）—— 省 69~88% 编译期槽位，
+>   但每步 O(n) 拷贝（整体 O(n²)）、实例化数 = 段数，**运行期零差别**。结论：现状够用，不为此再动 `Pattern`。
+>   🔄 **修订（2026-10-13 同日，用户指出）**：上面那个 69~88% **对比错了基准** —— **段数本来就是 `count(raw, '/')`**
+>   （扫描每轮至多 push 一个段、消耗一个 `/`；合法 pattern 恰好相等，非法的也不超），用 `constexpr` **朴素数一下**就能拿到，
+>   **不需要元编程**；`names` 再数一遍命名捕获即可。按此重算（现在 / 朴素精确 / 技巧）：`/health` 16 / **1** / 2 · `/api/v1/echo` 26 / **3** / 4 ·
+>   `/files/{path...}` 34 / **3** / 4 · `/a/{x}/b/{y}` 26 / **6** / 8 —— **朴素精确计数全面优于技巧**。
+>   ⇒ **技巧在此处没有性价比**。原代码用宽松的 `raw.size()+1` 是因为**一个常量兼三用**（`segs` / `names` 容量 + `k_node_bound`）。
+>   ✅ **已实施（2026-10-13）**：拆成三个常量 —— `segment_count = count('/')`、`name_count = count('{')` 给两个数组，
+>   单留 `node_budget = raw.size() + 1` 给 `k_node_bound`（**值不变** ⇒ **建树行为一字不动**）。
+>   ⚠️ `k_node_bound` **不能**跟着收紧：`end_mark` 与匿名 `catch_all` 的边 label 是**空**的，"`#edges ≤ Σ 字符数`"不成立。
+>   复核：新增 5 条 `static_assert`（钉住维度）+ 原有 96 条 + `./tests/run.sh`（9/9）。
 #### D. 位置注入
 
 | 项 | 决定 | 状态 |
@@ -550,8 +590,10 @@ auto server = pylai::Server::builder()
 
 #### G. 本层尚未决定
 
-- GET 是否**自动注册 HEAD**；`OPTIONS` 自动应答；405 的 `Allow` 头
-- **重复注册**同一 `(method, path)` 的语义（现状是"最后一次覆盖"，与新设计是否冲突待定）
+- **HEAD** —— ✅ 已定（2026-10-13）：没写 `Head<>` 时，HEAD 复用同路径的 GET handler（响应**无体**、`Content-Length` 仍按 GET 算）；显式 `Head<>` 优先。**未落地 🔍**
+- **OPTIONS** —— ✅ 已定：自动应答 `204` + `Allow: …`（按该路径已注册的动词）；路径不存在 → 404。**未落地 🔍**
+- **405 的 `Allow` 头** —— 要做，和上面两条一批（都要“逐棵动词树试一遍”）。**未落地 🔍**
+- **重复注册同一 `(method, path)`** —— ✅ 已定（2026-10-13）：**编译期报错**（`validate_group`，错误里点名两条 pattern）。跨组不可能发生：一个 builder 只允许一次 `route_on`。**已落地 ✅**
 - **重建 API 形态**：`build()` 怎么暴露、"活跃集合"怎么表达
 - 路由分组 / 前缀挂载 / 中间件
 - 路由表打印（调试用）

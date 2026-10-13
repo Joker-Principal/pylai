@@ -33,6 +33,8 @@ CASES = [
     ("GET", "/users/42", b"", 200, "user id=42"),          # Param<int,"id"> 位置注入
     ("POST", "/submit/7", b"x=1", 200, "submitted id=7"),  # 同一组树里另一个动词
     ("POST", "/health", b"", 405, "405"),                  # 路径在、动词不符
+    ("GET", "/items", b"", 200, "items"),                  # 同路径两个动词：GET 走 GET 那棵
+    ("POST", "/items", b"", 200, "created"),               # 同路径两个动词：POST 走 POST 那棵
     ("GET", "/nope", b"", 404, "404"),                     # 路径不在
     ("GET", "/echo", b"", 404, "404"),                     # 旧字符串 API 已移除 → 不再有这条路由
     ("GET", "/users/abc", b"", 200, "user id=0"),          # 🔍 已知缺口：from_chars 失败静默给 0

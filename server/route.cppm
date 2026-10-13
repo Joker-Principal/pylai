@@ -16,14 +16,15 @@ module;
 export module pylai:route;
 
 import asio;
+import jk;
 import :http;
 
 export namespace pylai::route {
 
 using Handler = std::function<asio::awaitable<http::Response>(const http::Request&)>;
 
-// `route_on` 注册出来的一组路由（一棵编译期树 + 槽位表）；定义在文件后半，那里才用得到 Capture。
-struct RouteGroup;
+// 每个出现过的动词一张路由表（树 + 槽位表）；定义在文件后半，那里才用得到 Capture。
+struct VerbRoutes;
 
 class Router
 {
@@ -36,15 +37,16 @@ public:
 	Router(const Router&) = delete;
 	Router& operator=(const Router&) = delete;
 
-	// 声明式注册（`Builder::route_on`）的一组路由：树是编译期定容的，只能按组整体挂上去。
-	void add_group(RouteGroup&& group);
+	// 装上 `Builder::route_on` 声明出来的路由表。⚠️ 只该装一次 ——
+	// `Builder::route_on` 只允许调一次（它返回的 builder 已经没有 route_on 了）。
+	void set_routes(std::vector<VerbRoutes> routes);
 
 	// 未匹配返回 404；path 存在但 method 不匹配返回 405。
 	asio::awaitable<http::Response> dispatch(const http::Request& request) const;
 
 private:
-	// 声明式路由组；树在编译期定容，所以只能按组整体试（组数 = 调过 route_on 的类数）。
-	std::vector<RouteGroup> groups;
+	// 每个出现过的动词一条。vector 允许不完整类型 —— `VerbRoutes` 定义在文件后半。
+	std::vector<VerbRoutes> methods;
 };
 
 // ═══ path pattern —— 编译期解析（语法表见 docs/http-server-plan.md §11.2 A）═══
@@ -90,6 +92,16 @@ struct FixedString
 		return a.view() == b.view();
 	}
 };
+
+// 数一个字符在 `s` 里出现了几次。`consteval` ⇒ 结果必然能当数组的维度。
+template <FixedString s, char c>
+[[nodiscard]] consteval std::size_t count_of() noexcept
+{
+	std::size_t n = 0;
+	for(const char ch : s.view())
+		if(ch == c) ++n;
+	return n;
+}
 
 enum class SegKind : std::uint8_t
 {
@@ -146,11 +158,19 @@ template <FixedString s>
 struct Pattern
 {
 	static constexpr std::string_view raw = s.view();
-	static constexpr std::size_t cap = raw.size() + 1; // 段数上界
 
-	std::array<Segment, cap> segs{};
+	// 两个数组的维度都是**紧**的（不再按 raw 长度过分配）：
+	//   segment_count —— 段数。扫描每轮至多 push 一个段、消耗一个 '/' ⇒ 段数 ≤ '/' 的个数；合法 pattern 恰好相等。
+	//   name_count    —— 命名捕获的上界。每个命名捕获都在一个 `{...}` 里，而每组恰好一个 '{'（`{$}` 会多算一个，无妨）。
+	static constexpr std::size_t segment_count = count_of<s, '/'>();
+	static constexpr std::size_t name_count = count_of<s, '{'>();
+
+	// 仅给 `k_node_bound` 用，理由见那边（不能收紧，所以单独一个常量）。
+	static constexpr std::size_t node_budget = raw.size() + 1;
+
+	std::array<Segment, segment_count> segs{};
 	std::size_t count{0};
-	std::array<std::string_view, cap> names{};
+	std::array<std::string_view, name_count> names{};
 	std::size_t n_names{0};
 	ParseError err{ParseError::none};
 
@@ -169,12 +189,12 @@ struct Pattern
 
 	constexpr void push(SegKind k, std::string_view t, std::size_t pos, std::size_t len) noexcept
 	{
-		if (count < cap)
+		if (count < segment_count)
 			segs[count++] = Segment{
 				k, t, static_cast<std::uint32_t>(pos), static_cast<std::uint32_t>(len)
 			};
 
-		if (k != SegKind::literal && !t.empty() && n_names < cap)
+		if (k != SegKind::literal && !t.empty() && n_names < name_count)
 			names[n_names++] = t;
 	}
 
@@ -580,10 +600,11 @@ template <std::size_t node_capacity, FixedString... patterns>
 	return b.tree;
 }
 
-// 每个 pattern 最多造出 `Pattern<S>::cap` 个原子（每个原子至少占 1 个 raw 字符）
-// ⇒ 节点数上界 = Σ cap + 1。
+// 每 pattern 的节点上界按 `raw.size() + 1` 估（宽松）⇒ 节点数上界 = Σ(node_budget) + 1。
+// 为什么这里**不能**收紧成“段数”：end_mark 与匿名 catch_all 的边 label 是**空**的，
+// “#edges ≤ Σ 字符数”那条论证不适用。保持原值 ⇒ 建树行为一字不变。
 template <FixedString... patterns>
-inline constexpr std::size_t k_node_bound = (Pattern<patterns>::cap + ... + 0) + 1;
+inline constexpr std::size_t k_node_bound = (Pattern<patterns>::node_budget + ... + 0) + 1;
 
 // 「先算」：用宽松容量跑一遍，只读回实际用了多少节点。
 template <FixedString... patterns>
@@ -673,21 +694,8 @@ template <std::size_t node_capacity>
 	return k_no_route;
 }
 
-// ═══ 编译期路由表 —— 声明即校验 ═══
-// 用法（**必须声明成变量**才会实例化，从而触发校验）：
-//     inline constexpr Table<On<"GET", "/health">,
-//                            On<"GET", "/api/v1/users/{id}">> api;
-// 这里只校验 pattern 集合，不涉及 handler 与树（接线见 `docs/http-server-plan.md` §11.2 C）。
-
-template <FixedString verb, FixedString path>
-struct On
-{
-	static constexpr std::string_view method = verb.view();
-	static constexpr Pattern<path> spec{};
-};
-
+// ═══ 组级冲突检查 ═══
 // `methods` 与 `patterns` 按下标对齐；返回第一对冲突的**下标**。
-// 空 method = 不限定方法，与任何 method 都算重叠。
 [[nodiscard]] constexpr RouteConflict find_table_conflict(
 	std::span<const std::string_view> methods, std::span<const PatternView> patterns
 ) noexcept
@@ -695,26 +703,13 @@ struct On
 	for(std::size_t i = 0; i < patterns.size(); ++i)
 		for(std::size_t j = i + 1; j < patterns.size(); ++j)
 		{
-			const bool overlapping = methods[i] == methods[j] || methods[i].empty() || methods[j].empty();
+			const bool overlapping = methods[i] == methods[j];
 			if(overlapping && routes_conflict(patterns[i], patterns[j]))
 				return {static_cast<std::uint32_t>(i), static_cast<std::uint32_t>(j)};
 		}
 
 	return {};
 }
-
-template <typename... Entries>
-class Table
-{
-	static constexpr bool conflict_free() noexcept { return find_table_conflict(methods, patterns).ok(); }
-
-public:
-	static constexpr std::size_t size = sizeof...(Entries);
-	static constexpr std::array<std::string_view, size> methods{Entries::method...};
-	static constexpr std::array<PatternView, size> patterns{Entries::spec.view()...};
-
-	static_assert(conflict_free(), "路由表冲突：同一 method 下有两条路由会为同一路径争抢（规则与用例见 docs/http-server-plan.md §11.2 B）");
-};
 
 // ═══ 路由声明 DSL：动词 + 路径住在**返回类型**位置 ═══
 // 用法（注册入口是 `Server::Builder::route_on`）：
@@ -809,51 +804,97 @@ struct IsParam<Param<T, name>> : std::true_type
 {
 };
 
-// 成员指针 → 动词 / 路径 / 形参表
+// 成员指针 → 动词 / 路径 / 形参表。分解交给 jk 的 `Callable`：它覆盖 cv(4) × ref(3) × noexcept(2)
+// 全组合（手写偏特化只匹配裸形式 `R (C::*)(Ps...)`），而 `Arguments` 是带算法的 `TList`。
 template <class Pmf>
-struct RouteOf;
-
-template <class C, class R, class... Ps>
-struct RouteOf<R (C::*)(Ps...)>
+struct RouteOf
 {
-	using Result = R;
-	using Params = std::tuple<Ps...>;
+	using Result = JK::Meta::Return<Pmf>;
+	using Params = JK::Meta::Arguments<Pmf>;
 
-	static constexpr Verb verb = R::method;
-	static constexpr auto pattern = R::literal;
-	static constexpr std::string_view pattern_view = R::route_pattern;
+	static constexpr Verb verb = Result::method;
+	static constexpr auto pattern = Result::literal;
+	static constexpr std::string_view pattern_view = Result::route_pattern;
 };
+
+// 故意不定义：实例化它就是为了让编译错误里出现这两条冲突的 pattern。
+template <FixedString a, FixedString b>
+struct ShadowedRoute;
+
+// 第 i 个路由的 pattern（给上面那个诊断用）。
+template <std::size_t i, class... Pmf>
+inline constexpr auto nth_pattern = std::tuple_element_t<i, std::tuple<RouteOf<Pmf>...>>::pattern;
+
+// 单条路由的 pattern 实例。必须是**静态**的：`Pattern::view()` 返回的指针指进它自己，
+// 用临时对象的话那条指针就不是常量表达式（而 find_table_conflict 收的正好是这种指针）。
+template <class Pmf>
+struct SpecOf
+{
+	static constexpr Pattern<RouteOf<Pmf>::pattern> value{};
+};
+
+// 把 pattern 挑成一份名单（每 method 一棵树的基础）。
+template <FixedString... Ps>
+struct PatternList
+{
+};
+
+template <FixedString s, class List>
+struct PrependPattern;
+
+template <FixedString s, FixedString... Ps>
+struct PrependPattern<s, PatternList<Ps...>>
+{
+	using type = PatternList<s, Ps...>;
+};
+
+template <Verb verb, class... Pmf>
+struct SelectPatterns;
+
+template <Verb verb>
+struct SelectPatterns<verb>
+{
+	using type = PatternList<>;
+};
+
+template <Verb verb, class First, class... Rest>
+struct SelectPatterns<verb, First, Rest...>
+{
+	using kept = typename PrependPattern<RouteOf<First>::pattern, typename SelectPatterns<verb, Rest...>::type>::type;
+	using type = std::conditional_t<RouteOf<First>::verb == verb, kept,
+									typename SelectPatterns<verb, Rest...>::type>;
+};
+
+template <class>
+struct IsEmptyPatternList : std::false_type
+{
+};
+
+template <>
+struct IsEmptyPatternList<PatternList<>> : std::true_type
+{
+};
+
+template <FixedString... Ps>
+[[nodiscard]] constexpr auto build_of(PatternList<Ps...>) noexcept
+{
+	return build<Ps...>();
+}
 
 // 形参表里 `Param<>` 的个数
 template <class Params>
 struct ParamCount;
 
 template <class... Ps>
-struct ParamCount<std::tuple<Ps...>>
+struct ParamCount<JK::Meta::TList<Ps...>>
 	: std::integral_constant<std::size_t,
 							 (std::size_t{0} + ... + (IsParam<Ps>::value ? std::size_t{1} : std::size_t{0}))>
 {
 };
 
-// 第 index 个形参吃第几个捕获 = 它前面有多少个 `Param<>`
-template <std::size_t index, class... Ps>
-struct ParamSlot : std::integral_constant<std::size_t, 0>
-{
-};
-
-template <std::size_t index, class First, class... Rest>
-struct ParamSlot<index, First, Rest...>
-	: std::integral_constant<std::size_t,
-							 (index == 0 ? std::size_t{0} : (IsParam<First>::value ? std::size_t{1} : std::size_t{0})) +
-								 ParamSlot<index - 1, Rest...>::value>
-{
-};
-
+// 第 index 个形参吃第几个捕获 = 它**前面**有多少个 `Param<>`（`Slice<0, index>` 就是“前面那些形参”）。
 template <std::size_t index, class Params>
-struct SlotOf;
-
-template <std::size_t index, class... Ps>
-struct SlotOf<index, std::tuple<Ps...>> : ParamSlot<index, Ps...>
+struct SlotOf : ParamCount<typename Params::template Slice<0, index>>
 {
 };
 
@@ -862,7 +903,7 @@ template <std::size_t index, class Pmf>
 constexpr void check_param_name() noexcept
 {
 	using Params = typename RouteOf<Pmf>::Params;
-	using P = std::tuple_element_t<index, Params>;
+	using P = typename Params::template At<index>;
 
 	if constexpr(IsParam<P>::value)
 	{
@@ -893,7 +934,35 @@ constexpr void validate_route() noexcept
 	static_assert(ParamCount<Params>::value == Pattern<RouteOf<Pmf>::pattern>{}.params().size(),
 				  "路由声明：Param<> 的个数必须等于路径里的命名捕获个数");
 
-	check_all_param_names<Pmf>(std::make_index_sequence<std::tuple_size_v<Params>>{});
+	check_all_param_names<Pmf>(std::make_index_sequence<Params::size()>{});
+}
+
+// 一组的（动词, pattern）清单与冲突判定结果。⚠️ 必须是**静态**成员：`find_table_conflict`
+// 收的是 span，而局部 constexpr 数组的地址不是常量表达式。
+template <class... Pmf>
+struct GroupClash
+{
+	static constexpr std::size_t count = sizeof...(Pmf);
+	static constexpr std::array<std::string_view, count> methods{to_string(RouteOf<Pmf>::verb)...};
+	static constexpr std::array<PatternView, count> patterns{SpecOf<Pmf>::value.view()...};
+	static constexpr RouteConflict value = find_table_conflict(methods, patterns);
+};
+
+// 编译期校验一组路由：同一 method 下不得有两条会为同一路径争抢（规则见 docs/http-server-plan.md §11.2 B）。
+// 跨组冲突不存在 —— `Builder::route_on` 只允许调一次（返回的 builder 已经没有 route_on 了）。
+template <class... Pmf>
+constexpr void validate_group() noexcept
+{
+	static_assert(sizeof...(Pmf) > 0, "route_on 至少要注册一条路由");
+
+	constexpr RouteConflict clash = GroupClash<Pmf...>::value;
+
+	if constexpr(!clash.ok())
+	{
+		// ShadowedRoute 故意没有定义 → 编译错误里会直接打出这两条冲突的 pattern
+		[[maybe_unused]] constexpr std::size_t diagnostic =
+			sizeof(ShadowedRoute<nth_pattern<clash.a, Pmf...>, nth_pattern<clash.b, Pmf...>>);
+	}
 }
 
 // 造一个注入实参：`Param<T>` 取第 slot 个捕获的值（整数用 from_chars，string_view 直通）；其余形参拿 request。
@@ -901,7 +970,7 @@ template <std::size_t index, class Pmf>
 [[nodiscard]] decltype(auto) make_arg(const http::Request& request, std::span<const Capture> captures)
 {
 	using Params = typename RouteOf<Pmf>::Params;
-	using P = std::tuple_element_t<index, Params>;
+	using P = typename Params::template At<index>;
 
 	if constexpr(IsParam<P>::value)
 	{
@@ -927,41 +996,76 @@ template <std::size_t index, class Pmf>
 
 // 把成员函数指针包成 Handler：按自己的 pattern 匹配出捕获，再按形参表逐个造实参。
 // 组的树只给出槽位，而擦除后的 `Handler` 没有携带捕获的通道 → 这里必须按本条 pattern 再匹配一次拿捕获。
-template <class C, class R, class... Ps, std::size_t... indices>
-[[nodiscard]] Handler make_handler(C* self, R (C::*pmf)(Ps...), std::index_sequence<indices...>)
+template <class C, class F, std::size_t... indices>
+[[nodiscard]] Handler make_handler(C* self, F pmf, std::index_sequence<indices...>)
 {
 	return [self, pmf](const http::Request& request) -> asio::awaitable<http::Response> {
-		using Pmf = R (C::*)(Ps...);
-		static constexpr auto tree = build<RouteOf<Pmf>::pattern>();
+		static constexpr auto tree = build<RouteOf<F>::pattern>();
 
 		std::vector<Capture> captures;
 		if(match(tree, request.path, captures) == k_no_route)
 			co_return http::Response{500, "text/plain; charset=utf-8", {}, "路由派发：组命中但单条 pattern 未命中\n"};
 
-		co_return co_await (self->*pmf)(make_arg<indices, Pmf>(request, captures)...).release();
+		co_return co_await (self->*pmf)(make_arg<indices, F>(request, captures)...).release();
 	};
 }
 
-// route_on 的一组：所有 pattern 进同一棵编译期树（槽位 = pack 里的出现顺序），handler / 动词按槽位对齐。
-struct RouteGroup
+// 一个动词下的路由：一棵该动词的编译期树 + 与之按槽位对齐的 handler 表。
+// 动词必须分开建树：树只由 pattern 决定、动词不参与 —— 混在一棵树里的话
+// `Get<"/x">` 与 `Post<"/x">` 会落到同一节点、互相覆盖槽位（后注册的吃掉先注册的）。
+struct VerbRoutes
 {
+	std::string_view verb;
 	std::function<std::uint32_t(std::string_view, std::vector<Capture>&)> match;
-	std::vector<std::string_view> verbs;
 	std::vector<Handler> handlers;
 };
 
-template <class C, class... Pmf>
-[[nodiscard]] RouteGroup make_group(C* self, Pmf... pmf)
+// 挑出动词为 verb 的 handler；顺序与 SelectPatterns 选出的 pattern 一一对应。
+template <Verb verb, class C, class... Pmf>
+[[nodiscard]] std::vector<Handler> make_verb_handlers(C* self, Pmf... pmf)
 {
-	static constexpr auto tree = build<RouteOf<Pmf>::pattern...>();
-
-	RouteGroup group;
-	group.match = [](std::string_view path, std::vector<Capture>& out) { return match(tree, path, out); };
-	group.verbs = {to_string(RouteOf<Pmf>::verb)...};
-	group.handlers = {
-		make_handler(self, pmf, std::make_index_sequence<std::tuple_size_v<typename RouteOf<Pmf>::Params>>{})...
+	std::vector<Handler> handlers;
+	handlers.reserve(sizeof...(Pmf));
+	(void)std::initializer_list<int>{
+		(RouteOf<Pmf>::verb == verb ?
+			 (handlers.push_back(
+				  make_handler(self, pmf, std::make_index_sequence<RouteOf<Pmf>::Params::size()>{})
+			  ),
+			  0) :
+			 0)...
 	};
-	return group;
+	return handlers;
+}
+
+template <Verb verb, class C, class... Pmf>
+void add_verb_routes(std::vector<VerbRoutes>& routes, C* self, Pmf... pmf)
+{
+	using patterns = typename SelectPatterns<verb, Pmf...>::type;
+	if constexpr(!IsEmptyPatternList<patterns>::value)
+	{
+		static constexpr auto tree = build_of(patterns{});
+		routes.push_back(
+			VerbRoutes{to_string(verb), [](std::string_view path, std::vector<Capture>& out) { return match(tree, path, out); },
+					   make_verb_handlers<verb>(self, pmf...)}
+		);
+	}
+}
+
+// 一次 `route_on` 调用装出来的整张路由表：每个出现过的动词一条。
+template <class C, class... Pmf>
+[[nodiscard]] std::vector<VerbRoutes> make_routes(C* self, Pmf... pmf)
+{
+	std::vector<VerbRoutes> routes;
+	routes.reserve(7);
+
+	add_verb_routes<Verb::get>(routes, self, pmf...);
+	add_verb_routes<Verb::post>(routes, self, pmf...);
+	add_verb_routes<Verb::put>(routes, self, pmf...);
+	add_verb_routes<Verb::del>(routes, self, pmf...);
+	add_verb_routes<Verb::head>(routes, self, pmf...);
+	add_verb_routes<Verb::options>(routes, self, pmf...);
+	add_verb_routes<Verb::patch>(routes, self, pmf...);
+	return routes;
 }
 
 } // namespace pylai::route
@@ -1017,6 +1121,15 @@ static_assert(Pattern<"/">{}.count == 1 && Pattern<"/">{}.kind(0) == SegKind::ca
 // 尾斜杠 = 子树
 static_assert(Pattern<"/a/">{}.count == 2 && Pattern<"/a/">{}.kind(1) == SegKind::catch_all);
 
+// —— 数组维度是**紧**的（segment_count = count('/')，name_count = count('{')），不再按 raw 长度过分配 ——
+static_assert(Pattern<"/health">::segment_count == 1 && Pattern<"/health">::name_count == 0);
+static_assert(Pattern<"/api/v1/echo">::segment_count == 3 && Pattern<"/api/v1/echo">::name_count == 0);
+static_assert(Pattern<"/files/{path...}">::segment_count == 2 && Pattern<"/files/{path...}">::name_count == 1);
+static_assert(Pattern<"/api/v1/users/{id}/posts/{post_id}">::segment_count == 6 &&
+			  Pattern<"/api/v1/users/{id}/posts/{post_id}">::name_count == 2);
+// `{$}` 是匿名的 → 会占一个 `{` 但**不进** names（多算一个维度，无妨）
+static_assert(Pattern<"/a/{$}">::name_count == 1 && Pattern<"/a/{$}">{}.params().empty());
+
 // —— 参数提取：按出现顺序，匿名占位符不计入 ——
 static_assert(Pattern<"/health">{}.params().empty());
 static_assert(Pattern<"/users/{id}">{}.params().size() == 1 && Pattern<"/users/{id}">{}.params()[0] == "id");
@@ -1052,7 +1165,22 @@ static_assert(ParamCount<Health::Params>::value == 0);
 static_assert(ParamCount<Submit::Params>::value == 1);
 static_assert(SlotOf<0, Submit::Params>::value == 0);
 static_assert(SlotOf<1, Submit::Params>::value == 1); // request 占形参位，但不吃捕获
-static_assert(std::is_same_v<std::tuple_element_t<0, Submit::Params>, Param<int, "id">>);
+static_assert(std::is_same_v<typename Submit::Params::template At<0>, Param<int, "id">>);
+
+// 换用 jk 的 `Callable` 白拿的能力：cv / noexcept 形式的成员指针也能当路由声明
+// （旧的手写偏特化只匹配 `R (C::*)(Ps...)` —— 反证见 `.vscode/tmp/jk-callable-probe/old-trait.cpp`）。
+struct QualifiedUser
+{
+	Get<"/c"> ping(const http::Request&) const;
+	Post<"/n/{id}"> post(Param<int, "id"> id, const http::Request&) noexcept;
+};
+
+using ConstPing = RouteOf<decltype(&QualifiedUser::ping)>;
+using NothrowPost = RouteOf<decltype(&QualifiedUser::post)>;
+
+static_assert(ConstPing::verb == Verb::get && ConstPing::pattern_view == "/c");
+static_assert(NothrowPost::verb == Verb::post && NothrowPost::pattern_view == "/n/{id}");
+static_assert(SlotOf<1, NothrowPost::Params>::value == 1);
 
 // 触发三条声明的编译期校验（Param 个数 / 名字 / pattern 合法性）
 inline constexpr bool validated =
@@ -1060,11 +1188,13 @@ inline constexpr bool validated =
 	 validate_route<decltype(&User::files)>(), true);
 static_assert(validated);
 
-// 强制实例化整条注册链（只求编译，不调用）：make_group → make_handler → make_arg + build<...>()
+// 强制实例化整条注册链（只求编译，不调用）：make_routes → make_handler → make_arg + build<...>()
 inline void instantiate_chain()
 {
-	[[maybe_unused]] auto group =
-		make_group(static_cast<User*>(nullptr), &User::health, &User::submit, &User::files);
+	[[maybe_unused]] auto routes =
+		make_routes(static_cast<User*>(nullptr), &User::health, &User::submit, &User::files);
+	[[maybe_unused]] auto qualified =
+		make_routes(static_cast<QualifiedUser*>(nullptr), &QualifiedUser::ping, &QualifiedUser::post);
 }
 
 } // namespace dsl_selftest
@@ -1099,13 +1229,15 @@ inline constexpr auto diverge_param = Pattern<"/a/{x}/c">{};
 inline constexpr auto diverge_literal = Pattern<"/a/b/{y}">{};
 inline constexpr auto exact_end = Pattern<"/a/{$}">{};
 
-// 同一 method 下两条路由是否冲突。
-[[nodiscard]] constexpr bool conflicts(PatternView a, PatternView b)
+// 指定 method 时两条路由是否冲突。
+[[nodiscard]] constexpr bool conflicts_as(std::string_view method_a, PatternView a, std::string_view method_b, PatternView b)
 {
-	const std::string_view methods[] = {"GET", "GET"};
+	const std::string_view methods[] = {method_a, method_b};
 	const PatternView both[] = {a, b};
 	return !find_table_conflict(methods, both).ok();
 }
+
+[[nodiscard]] constexpr bool conflicts(PatternView a, PatternView b) { return conflicts_as("GET", a, "GET", b); }
 
 static_assert(conflicts(selftest::user_by_id.view(), selftest::user_by_id.view())); // 完全重复
 static_assert(conflicts(selftest::user_by_id.view(), by_name.view()));				// 同形异名
@@ -1116,36 +1248,10 @@ static_assert(!conflicts(selftest::user_by_id.view(), by_id_posts.view()));			//
 static_assert(!conflicts(diverge_param.view(), diverge_literal.view()));			// 分歧点有字面量 → 放行
 static_assert(!conflicts(wild_one.view(), exact_end.view()));						// param 捕不到空段
 
+// 同 pattern、不同 method → 不是冲突（靠“每 method 一棵树”各走各的）
+static_assert(!conflicts_as("GET", selftest::user_by_id.view(), "POST", selftest::user_by_id.view()));
+
 } // namespace conflict_selftest
-
-namespace table_selftest {
-
-// 同一 method 下 pattern 互不相同 → 合法
-inline constexpr Table<
-	On<"GET", "/health">,
-	On<"GET", "/api/v1/users/{id}">,
-	On<"POST", "/api/v1/users">,
-	On<"GET", "/files/{path...}">>
-	api;
-
-// 同一个 pattern 换个 method → 不是冲突
-inline constexpr Table<On<"GET", "/a/{x}">, On<"POST", "/a/{x}">> per_method;
-
-inline constexpr std::string_view m_two_get[] = {"GET", "GET"};
-inline constexpr std::string_view m_get_post[] = {"GET", "POST"};
-inline constexpr std::string_view m_any_get[] = {"", "GET"};
-
-inline constexpr PatternView pv_mix[] = {
-	conflict_selftest::wild_one.view(),
-	conflict_selftest::wild_rest.view(),
-};
-
-static_assert(!find_table_conflict(m_two_get, pv_mix).ok()); // 同 method、两个通配符抢同一段
-static_assert(find_table_conflict(m_get_post, pv_mix).ok()); // method 不同 → 放过
-static_assert(!find_table_conflict(m_any_get, pv_mix).ok()); // 空 method 与任何 method 重叠
-static_assert(find_table_conflict(m_two_get, pv_mix).a == 0 && find_table_conflict(m_two_get, pv_mix).b == 1);
-
-} // namespace table_selftest
 
 namespace match_selftest {
 

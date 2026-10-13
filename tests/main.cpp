@@ -16,6 +16,10 @@ struct App
 	Get<"/health"> health(const pylai::http::Request& request);
 	Get<"/users/{id}"> user(Param<int, "id"> id, const pylai::http::Request& request);
 	Post<"/submit/{id}"> submit(Param<int, "id"> id, const pylai::http::Request& request);
+
+	// 同一条路径、两个动词：树按 pattern 建、动词不参与，所以这一组必须靠「每 method 一棵树」才不互相吃。
+	Get<"/items"> list_items(const pylai::http::Request& request);
+	Post<"/items"> create_item(const pylai::http::Request& request);
 };
 
 Get<"/health"> App::health(const pylai::http::Request&)
@@ -39,6 +43,20 @@ Post<"/submit/{id}"> App::submit(Param<int, "id"> id, const pylai::http::Request
 	co_return response;
 }
 
+Get<"/items"> App::list_items(const pylai::http::Request&)
+{
+	pylai::http::Response response;
+	response.body = "items\n";
+	co_return response;
+}
+
+Post<"/items"> App::create_item(const pylai::http::Request&)
+{
+	pylai::http::Response response;
+	response.body = "created\n";
+	co_return response;
+}
+
 } // namespace
 
 int main()
@@ -48,7 +66,8 @@ int main()
 		App app; // 必须比 server 活得久：路由里存的是 &app
 		auto server = pylai::Server::builder()
 		                  .bind("127.0.0.1", 18080)
-		                  .route_on(&app, &App::health, &App::user, &App::submit)
+		                  .route_on(&app, &App::health, &App::user, &App::submit, &App::list_items,
+		                            &App::create_item)
 		                  .build();
 		return server.run();
 	}

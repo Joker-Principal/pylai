@@ -29,25 +29,25 @@ http::Response text_response(int status, std::string body)
 Router::Router() = default;
 Router::~Router() = default;
 
-void Router::add_group(RouteGroup&& group) { groups.push_back(std::move(group)); }
+void Router::set_routes(std::vector<VerbRoutes> routes) { methods = std::move(routes); }
 
 asio::awaitable<http::Response> Router::dispatch(const http::Request& request) const
 {
-	// 一组一棵树；路径命中但动词不符 → 先记下 405，继续找（别组可能同路径带该动词）
 	std::vector<Capture> captures;
-	bool path_known = false;
 
-	for(const RouteGroup& group : groups)
+	// 快路径：只试请求动词那棵树。
+	for(const VerbRoutes& route : methods)
 	{
-		const std::uint32_t slot = group.match(request.path, captures);
-		if(slot == k_no_route) continue;
+		if(route.verb != request.method) continue;
 
-		path_known = true;
-		if(slot < group.handlers.size() && group.verbs[slot] == request.method)
-			co_return co_await group.handlers[slot](request);
+		const std::uint32_t slot = route.match(request.path, captures);
+		if(slot < route.handlers.size()) co_return co_await route.handlers[slot](request);
 	}
 
-	if(path_known) co_return text_response(405, "405 Method Not Allowed\n");
+	// 该路径在别的动词上存在吗？有 → 405，没有 → 404。
+	for(const VerbRoutes& route : methods)
+		if(route.match(request.path, captures) != k_no_route) co_return text_response(405, "405 Method Not Allowed\n");
+
 	co_return text_response(404, "404 Not Found\n");
 }
 

@@ -23,21 +23,41 @@ public:
 	class Builder
 	{
 	public:
+		// 路由注册完之后只剩 `build()` —— 于是“第二个 route_on”根本编不过，
+		// 跨组路由冲突也就不存在了。设置项要写在 route_on 之前。
+		class Configured
+		{
+		public:
+			Server build();
+
+		private:
+			friend class Builder;
+
+			Configured(Settings settings, route::Router routes) :
+				settings_(std::move(settings)),
+				routes_(std::move(routes))
+			{
+			}
+
+			Settings settings_;
+			route::Router routes_;
+		};
+
 		Builder& bind(std::string address, std::uint16_t port);
 		Builder& io_threads(std::size_t count);
 		Builder& idle_timeout(std::chrono::seconds timeout);
 		Builder& write_timeout(std::chrono::seconds timeout);
 		Builder& max_requests_per_connection(std::size_t count);
 
-		// 声明式注册：`builder.route_on(this, &User::health, &User::submit)`。
+		// 声明式注册：`builder.bind(...).route_on(&app, &App::health, &App::submit).build()`。
 		// 动词 / 路径 / 形参表全从成员指针取（返回类型是 route::Endpoint<...>，形参里的 Param<> 按位置吃捕获）。
-		// 整包做成**一组**（一棵编译期树 + 槽位表），因为树是定容的、运行期加不了单条路由。
 		template <class C, class... Pmf>
-		Builder& route_on(C* self, Pmf... pmf)
+		[[nodiscard]] Configured route_on(C* self, Pmf... pmf)
 		{
-			(route::validate_route<Pmf>(), ...); // 编译期校验：Param 个数 / 名字 / pattern 合法性
-			routes.add_group(route::make_group(self, pmf...));
-			return *this;
+			(route::validate_route<Pmf>(), ...); // 单条：Param 个数 / 名字 / pattern 合法性
+			route::validate_group<Pmf...>();	 // 组内：同一 method 下不得有两条路由争抢同一路径
+			routes.set_routes(route::make_routes(self, pmf...));
+			return Configured{std::move(settings), std::move(routes)};
 		}
 
 		Server build();
