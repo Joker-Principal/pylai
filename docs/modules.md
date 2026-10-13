@@ -44,6 +44,19 @@ jk  ──→  :route
 > `:config (:http) ← :route ← :session ← :server ← :app ← pylai`。
 > **`App` 已与 `Server` 合并**，该图作废——原图当时留在 `config.cppm` 里，属于"随代码失效的注释"。
 
+## 跨 target 的 PCM 语言选项必须一致（✅ 已验证）
+
+jk（`FetchContent` 拉的那个）对自己的 target 设了 `CXX_EXTENSIONS OFF` ⇒ 它的编译命令是 `-std=c++23`。
+我们若保持 CMake 默认的 `CXX_EXTENSIONS ON`（`-std=gnu++23`），**clice 会拒绝加载 jk 的 PCM**：
+
+```
+BuildPCM failed for module pylai:route: GNU extensions was disabled in precompiled file '…/jk-….pcm'
+but is currently enabled; … cannot be loaded due to a configuration mismatch
+```
+
+⇒ 根 `CMakeLists.txt` 设 `set(CMAKE_CXX_EXTENSIONS OFF)` 对齐。ninja 直接构建能容忍这种混用，
+**只有 clice 的 PCM 复用会硬失败** —— 而后果不是把报错拍在脸上，是**索引静默退化**（该文件只剩扫描级符号，导航缺一半）。
+
 ## 实现单元的 import 规则（✅ 已验证）
 
 实现单元（`module pylai;`，**不带分区名**）里用到的每个 `import`，

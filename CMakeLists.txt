@@ -3,6 +3,11 @@ project(asio-module)
 cmake_policy(SET CMP0167 NEW)
 
 set(CMAKE_CXX_STANDARD 23)
+# 关掉 GNU 扩展（→ `-std=c++23`），与 jk 对齐：jk 对自己的 target 设了 CXX_EXTENSIONS OFF，
+# 我们若保持默认的 ON（`-std=gnu++23`），clice 加载 jk 的 PCM 会因语言选项不匹配被拒
+# （"GNU extensions was disabled in precompiled file … but is currently enabled"），
+# 于是 `import jk;` 的 TU 编不过、索引退化。理由详见 `docs/changelog.md`（2026-10-13）。
+set(CMAKE_CXX_EXTENSIONS OFF)
 
 # ---------------------------------------------------------------------------
 # jk —— Joker's C++ Kit（https://github.com/Joker-Principal/jk）

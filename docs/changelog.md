@@ -5,6 +5,14 @@
 
 ## 2026-10-13
 
+- **统一语言标准：`set(CMAKE_CXX_EXTENSIONS OFF)`（`-std=gnu++23` → `-std=c++23`）** ✅ —— clice 索引退化的根因。
+  起因：clice 对 `server/route.cpp` 里一部分符号没反应。日志（`.clice/logs/<会话>/master.log`）：
+  `BuildPCM failed for module pylai:route: GNU extensions was disabled in precompiled file …/pcm/jk-….pcm but is currently enabled`
+  → clice 缓存的 jk PCM 是 `-std=c++23`（jk 的 `CMakeLists.txt:70` 是 `CXX_EXTENSIONS OFF`），我们的 TU 是 CMake 默认的 `-std=gnu++23`
+  → clang 拒绝加载 → `JK` 全未声明 → `route.cppm`（今天起 `import jk;`）编不过，连带 `route.cpp` 编不过 → 无 AST → 索引只剩扫描级浅结果。
+  复核：重建后新会话 `BuildPCM failed` / `GNU extensions` 均 **0** 条；`route.cpp` 符号 19 → **50**，`Router::dispatch` 恢复 `HasDefinition` + `route.cpp: definitions=1`；`session.cpp`（早就 `import jk;`）同样 19 → 146。
+  细节与征兆见 `modules.md`（跨 target PCM 选项必须一致）。
+
 - **`pmf` 类型萃取改用 jk 的 `Callable`；形参表换 `TList`** ✅ —— 用户提示 jk 有 callable 工具。
   `RouteOf` 不再手写 `RouteOf<R (C::*)(Ps...)>` 偏特化（只匹配裸形式），改用 `JK::Meta::Return` / `Arguments`；
   `make_handler` 也不再分解 `R / C / Ps`。`Params` 由 `std::tuple` 换 `TList` → `ParamSlot` 递归 + `SlotOf` 偏特化（20 行）
