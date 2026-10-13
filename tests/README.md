@@ -6,14 +6,16 @@
 
 | 文件 | 作用 |
 |---|---|
-| `main.cpp` | 示例应用 `App`：用位置注入 DSL 声明 `/health`、`/users/{id}`、`/submit/{id}`，并启动服务器 |
+| `main.cpp` | 示例应用 `App`：声明 `/health`、`/users/{id}`、`/submit/{id}` 等路由，并启动服务器 |
+| `route_static.cpp` | 路由那套的**编译期用例**（`static_assert`）：pattern 语法 / 匹配语义 / 冲突规则 / DSL 与 `param()` |
 | `http_e2e.py` | 对运行中的服务器发原始 HTTP 请求，断言状态码与响应体 |
 | `run.sh` | 串起来：查端口 → 起服务器 → 跑 `http_e2e.py` → 收工 |
 
 产物可执行 target **`app`**（`build-dev_llvm/tests/Debug/app`）。
 
-> 这里**不是**单元测试目录。路由那套的编译期用例在 `server/route.cppm` 的 `static_assert` 里 ——
-> 每次 `cmake --build` 都会求值，构建过 = 用例过。
+> `route_static.cpp` 不参与运行 —— `static_assert` 在**编译期**就求值完了，**构建过 = 用例过**。
+> 它只用 `import pylai;` 的**导出面**（消费方视角），顺带验收“该导出的都导出了”。
+> ⚠️ “必须编不过”的失败路径不在这里（编译期拦不住的、或拦下的错误文案）→ 人工探针，见 `docs/http-server-plan.md` §11.2。
 
 ## 为什么应用不在 `server/`
 

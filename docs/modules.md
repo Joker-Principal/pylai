@@ -66,6 +66,9 @@ but is currently enabled; … cannot be loaded due to a configuration mismatch
 ⚠️ 另一条：实现单元若写成 `module pylai:part;`，CMake 会当成**内部分区**，
 于是报 "module-providing source 不在 CXX_MODULES 文件集"。**实现单元写 `module pylai;` 就好。**
 
+⚠️ **消费方要自己 `import asio;`** —— handler 的返回类型是 `asio::awaitable<void>`，而 `pylai` 没有 `export import asio`
+（框架不替消费方决定 asio 的可见性）。示例见 `tests/main.cpp` 顶部。
+
 ## 标准库头 / C 头必须放全局模块片段（✅ 已验证）
 
 在**模块附加区**（`export module ...;` 之后）include 标准库头，会让 `<wchar.h>` 之类
@@ -87,9 +90,11 @@ but is currently enabled; … cannot be loaded due to a configuration mismatch
   应用侧写 `asio::ssl::context::verify_peer`。
 - 弃用名要按 `ASIO_NO_DEPRECATED` 守卫（该宏生效的头：`basic_deadline_timer.hpp`、`basic_io_object.hpp`、
   `deadline_timer.hpp`、`io_context_strand.hpp`、`time_traits.hpp`）。
-- ⚠️ 要让自家类型当**协程返回类型**，必须**导出** `asio::detail::awaitable_frame`：
-  `awaitable` 本身**没有** `promise_type` 成员，asio 自己也是靠 `coroutine_traits<awaitable<T,Executor>, ...>`
-  指过去的（`impl/awaitable.hpp:1082`）。
+- 🔄 **2026-10-13 修订**：要让自家类型当**协程返回类型**时，确实需要 `awaitable_frame` 可见（`awaitable` 本身**没有** `promise_type`，
+  asio 自己也是靠 `coroutine_traits<awaitable<T,Executor>, ...>` 指过去的，`impl/awaitable.hpp:1082`），
+  而那种写法要靠特化 `std::coroutine_traits` **按名字**引用帧类型 ⇒ 当时导出了它。
+  ⚠️ 但**声明搬到第一个形参后不再需要**（`route.cppm` 的特化已删）：handler 返回 `awaitable<void>` 是天然的，
+  没有任何代码再按名字点到帧类型。✅ 实验：删掉 `using asio::detail::awaitable_frame;` 后全量重编 18 步通过（含 asio PCM 与全部下游）。
 
 ## 相关
 

@@ -3,86 +3,80 @@
 #include <exception>
 #include <string>
 
+import asio; // handler 返回 asio::awaitable<void> ⇒ 消费方自己 import asio（框架不 export import 它）
 import pylai;
 
 namespace {
 
-// 位置注入写法：动词 + 路径住在**返回类型**位置，`Param<T[, name]>` 按位置吃第 N 个命名捕获。
+// 声明写法：动词 + 路径住在**第一个形参**（`Get<P>` 既是路由声明、也是请求类型），
+// 响应按**引用**传进来由 handler 填，handler 返回 `asio::awaitable<void>`。
 // 注册入口是 `Builder::route_on(&app, &App::...)`，整包一次挂上去。
 using namespace pylai::route;
 
 struct App
 {
-	Get<"/health"> health(const pylai::http::Request& request);
-	Get<"/users/{id}"> user(Param<int, "id"> id, const pylai::http::Request& request);
-	Post<"/submit/{id}"> submit(Param<int, "id"> id, const pylai::http::Request& request);
+	asio::awaitable<void> health(Get<"/health"> req, pylai::http::Response& res);
+	asio::awaitable<void> user(Get<"/users/{id}"> req, pylai::http::Response& res);
+	asio::awaitable<void> submit(Post<"/submit/{id}"> req, pylai::http::Response& res);
 
 	// 同一条路径、两个动词：树按 pattern 建、动词不参与，所以这一组必须靠「每 method 一棵树」才不互相吃。
-	Get<"/items"> list_items(const pylai::http::Request& request);
-	Post<"/items"> create_item(const pylai::http::Request& request);
+	asio::awaitable<void> list_items(Get<"/items"> req, pylai::http::Response& res);
+	asio::awaitable<void> create_item(Post<"/items"> req, pylai::http::Response& res);
 
 	// HEAD 的钉子：`/both` 同时有 GET 与显式 `Head<>`（显式优先）；`/health` 只有 GET → HEAD 复用 GET。
-	Get<"/both"> both(const pylai::http::Request& request);
-	Head<"/both"> both_head(const pylai::http::Request& request);
+	asio::awaitable<void> both(Get<"/both"> req, pylai::http::Response& res);
+	asio::awaitable<void> both_head(Head<"/both"> req, pylai::http::Response& res);
 
-	// 请求体：llhttp 的 on_body 把体（chunked 已解码）填进 request.body，handler 直接读。
-	Post<"/body"> echo_body(const pylai::http::Request& request);
+	// 请求体：llhttp 的 on_body 把体（chunked 已解码）填进 `req.raw.body`，handler 直接读。
+	asio::awaitable<void> echo_body(Post<"/body"> req, pylai::http::Response& res);
 };
 
-Get<"/health"> App::health(const pylai::http::Request&)
+asio::awaitable<void> App::health(Get<"/health">, pylai::http::Response& res)
 {
-	pylai::http::Response response;
-	response.body = "ok\n";
-	co_return response;
+	res.body = "ok\n";
+	co_return;
 }
 
-Get<"/users/{id}"> App::user(Param<int, "id"> id, const pylai::http::Request&)
+asio::awaitable<void> App::user(Get<"/users/{id}"> req, pylai::http::Response& res)
 {
-	pylai::http::Response response;
-	response.body = "user id=" + std::to_string(id.value) + "\n";
-	co_return response;
+	res.body = "user id=" + std::to_string(req.param<int, "id">()) + "\n";
+	co_return;
 }
 
-Post<"/submit/{id}"> App::submit(Param<int, "id"> id, const pylai::http::Request&)
+asio::awaitable<void> App::submit(Post<"/submit/{id}"> req, pylai::http::Response& res)
 {
-	pylai::http::Response response;
-	response.body = "submitted id=" + std::to_string(id.value) + "\n";
-	co_return response;
+	res.body = "submitted id=" + std::to_string(req.param<int, "id">()) + "\n";
+	co_return;
 }
 
-Get<"/items"> App::list_items(const pylai::http::Request&)
+asio::awaitable<void> App::list_items(Get<"/items">, pylai::http::Response& res)
 {
-	pylai::http::Response response;
-	response.body = "items\n";
-	co_return response;
+	res.body = "items\n";
+	co_return;
 }
 
-Post<"/items"> App::create_item(const pylai::http::Request&)
+asio::awaitable<void> App::create_item(Post<"/items">, pylai::http::Response& res)
 {
-	pylai::http::Response response;
-	response.body = "created\n";
-	co_return response;
+	res.body = "created\n";
+	co_return;
 }
 
-Get<"/both"> App::both(const pylai::http::Request&)
+asio::awaitable<void> App::both(Get<"/both">, pylai::http::Response& res)
 {
-	pylai::http::Response response;
-	response.body = "get\n";
-	co_return response;
+	res.body = "get\n";
+	co_return;
 }
 
-Head<"/both"> App::both_head(const pylai::http::Request&)
+asio::awaitable<void> App::both_head(Head<"/both">, pylai::http::Response& res)
 {
-	pylai::http::Response response;
-	response.body = "explicit-head\n"; // 长度与 GET 故意不同 → e2e 据此看出是谁应答的
-	co_return response;
+	res.body = "explicit-head\n"; // 长度与 GET 故意不同 → e2e 据此看出是谁应答的
+	co_return;
 }
 
-Post<"/body"> App::echo_body(const pylai::http::Request& request)
+asio::awaitable<void> App::echo_body(Post<"/body"> req, pylai::http::Response& res)
 {
-	pylai::http::Response response;
-	response.body = "body=" + request.body;
-	co_return response;
+	res.body = "body=" + req.raw.body;
+	co_return;
 }
 
 } // namespace

@@ -32,11 +32,6 @@ export namespace asio {
     using asio::any_io_executor;
     using asio::bad_executor;
     using asio::awaitable;
-    // 应用侧要靠它特化 std::coroutine_traits（让带标记的返回类型能当协程返回类型）。
-    // asio 的 `awaitable` 本身**没有** promise_type 成员，asio 自己也是用
-    // `coroutine_traits<awaitable<T,Executor>, ...>` 指到它的（impl/awaitable.hpp:1082），
-    // 所以这是拿到 promise 的唯一入口 → 必须导出（应用规矩：要用 asio 名字就往这里加一行）。
-    using asio::detail::awaitable_frame;
     using asio::as_tuple_t;
     using asio::as_tuple;
     using asio::detached_t;

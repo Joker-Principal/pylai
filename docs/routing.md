@@ -2,11 +2,7 @@
 
 > 写 handler、要指定路由时查这份。
 >
-> - **怎么声明路由** → §1：`Get<"…">` 写在**返回类型**位置，形参用 `Param<>`，交给 `Builder::route_on` 注册。
->
-> ⚠️ **2026-10-13：声明位置已定要改** —— 方向是 `asio::awaitable<void> handle(Get<"/health"> req, FileResponse& res)`：
-> 动词 + pattern 搬到**第一个形参**、响应类型多种、响应由框架发。**本文写的都还是当前实现的写法**，落地后 §1 要重写。
-> 设计见 `http-server-plan.md` §4.1 / §4.1.1。
+> - **怎么声明路由** → §1：`Get<"…">` 写在**第一个形参**上（它既是声明、也是请求），handler 返回 `asio::awaitable<void>`，响应按引用填。
 > - **pattern 的语法与匹配语义** → §2–§6：`Get<>` 尖括号里写的、`Pattern<>` 里写的，是**同一套** pattern。
 > - 所有规则在**编译期**生效：pattern 写错、路由之间冲突，都**编不过**。
 
@@ -14,23 +10,23 @@
 
 ## 1. 怎么声明路由
 
-动词与路径写在**返回类型**位置，handler 形参里的 `Param<>` 按**位置**吃命名捕获，整包一次注册：
+动词与路径写在**第一个形参**上（`Get<P>` 既是路由声明、也是**这条路由的请求类型**）；
+handler 返回 `asio::awaitable<void>`，响应按**引用**传进来由它填；整包一次注册：
 
 ```cpp
 using namespace pylai::route;
 
 struct App
 {
-	Get<"/health"> health(const pylai::http::Request& request);
-	Get<"/users/{id}"> user(Param<int, "id"> id, const pylai::http::Request& request);
-	Post<"/submit/{id}"> submit(Param<int, "id"> id, const pylai::http::Request& request);
+	asio::awaitable<void> health(Get<"/health"> req, pylai::http::Response& res);
+	asio::awaitable<void> user(Get<"/users/{id}"> req, pylai::http::Response& res);
+	asio::awaitable<void> submit(Post<"/submit/{id}"> req, pylai::http::Response& res);
 };
 
-Get<"/users/{id}"> App::user(Param<int, "id"> id, const pylai::http::Request&)
+asio::awaitable<void> App::user(Get<"/users/{id}"> req, pylai::http::Response& res)
 {
-	pylai::http::Response response;
-	response.body = "user id=" + std::to_string(id.value) + "\n";
-	co_return response;
+	res.body = "user id=" + std::to_string(req.param<int, "id">()) + "\n";
+	co_return;
 }
 
 App app;   // 必须比 server 活得久：路由里存的是 &app
@@ -40,16 +36,24 @@ auto server = pylai::Server::builder()
     .build();
 ```
 
+> 📌 消费方要自己 `import asio;` —— handler 的返回类型就是 asio 的 awaitable；实例化 handler 的 TU 还要 `#include <coroutine>`（见 `modules.md`）。
+
 | 元素 | 说明 |
 |---|---|
-| `Get<>` `Post<>` `Put<>` `Delete<>` `Head<>` `Options<>` `Patch<>` | 动词；尖括号里是 path pattern |
-| `Param<T>` / `Param<T, "name">` | 第 N 个 `Param<>` 吃 pattern 第 N 个**命名捕获**；写了名字就与对应位置的捕获名做编译期校对 |
-| 其它形参（如 `const http::Request&`） | 拿整个请求 |
+| **第一个形参** | 必须是 `Get<P>` / `Post<P>` / …：它在编译期给出动词与 path pattern，同时**就是请求**（本次请求的 method / path / headers 在它里面，`req.raw` 是框架解析出的 `http::Request`） |
+| `req.param<T, "名字">()` | 取一个命名捕获。**名字必写**，且在**编译期**对着 pattern 校对；整数走 `from_chars`，`std::string_view` 直通 |
+| `pylai::http::Response&` | 框架持有的响应对象，handler 往里填（状态码 / 头 / 体）。**可以不写** —— 不写就发默认的 `200` + 空体 |
+| 返回类型 | 必须是 `asio::awaitable<void>` |
 | `Builder::route_on(&app, &App::m...)` | 一次注册整包；**每个动词一棵**编译期定容的树（不是一棵） |
 
-**编译期会拦住**：pattern 语法不合法 · `Param<>` 个数 ≠ 命名捕获个数 · `Param<>` 名字与对应位置捕获名不一致。
+**编译期会拦住**：pattern 语法不合法 · 第一个形参不是请求类型 · 返回类型不是 `awaitable<void>` · `param<T, "名字">()` 里的名字在 pattern 里不存在 · 形参用了别的类型。
 
-> ⚠️ **已知缺口**：`Param<int>` 目前用 `std::from_chars` 转换，**失败时静默取 0**（`/users/abc` → `id == 0`）。
+> 📌 **“pattern 里的名字没人读”不算错** —— 读取发生在 handler 体内，编译期看不到；这与旧的 `Param<>` 位置注入相比少了一个检查（换来的是错误定位到写的那一行）。
+
+> ⚠️ **读体接口还没落地**：现在经 `req.raw.body` 读（框架先读完整个消息），
+> `req.body()` / `req.read_some()` 是下一刀（见 `http-server-plan.md` §4.1）。
+
+> ⚠️ **已知缺口**：`param<int, …>()` 用 `std::from_chars` 转换，**失败时静默取 0**（`/users/abc` → `id == 0`）。
 > 要回 400 得由 handler 自己判；该语义尚未定案（见 `http-server-plan.md` §11.2 D）。
 
 ### 1.1 编译期会拦下什么
@@ -57,8 +61,10 @@ auto server = pylai::Server::builder()
 | 情形 | 怎么报 |
 |---|---|
 | pattern 语法不合法 | 「路由声明：路径 pattern 语法不合法…」 |
-| `Param<>` 个数 ≠ 命名捕获个数 | 「路由声明：`Param<>` 的个数必须等于…」 |
-| `Param<>` 名字与对应位置的捕获名不一致 | 「路由声明：`Param` 的名字与路径里对应位置的捕获名不一致…」 |
+| 第一个形参不是 `Get<…>` 这类 | 「路由声明：第一个形参必须是 `Get<"…">` / `Post<"…">` 这样的请求类型…」 |
+| 返回类型不是 `asio::awaitable<void>` | 「路由声明：handler 必须返回 `asio::awaitable<void>`…」 |
+| `param<T, "名字">()` 里的名字不在 pattern 里 | 「路由声明：路径里没有这个名字的命名捕获」 |
+| 形参是别的类型（比如 `int`） | 「路由注入：形参只能是 `Get<…>`（第 0 个）/ `http::Response&`」 |
 | 同一动词下两条路由会为同一路径争抢 | 编译错误里直接出现这两条 pattern（`ShadowedRoute<"…", "…">`） |
 | 写了两次 `route_on` | `no member named 'route_on'` —— `route_on` 之后返回的 builder 只剩 `build()` |
 

@@ -712,16 +712,17 @@ template <std::size_t node_capacity>
 	return {};
 }
 
-// ═══ 路由声明 DSL：动词 + 路径住在**返回类型**位置 ═══
+// ═══ 路由声明 DSL：动词 + 路径住在**第一个形参** ═══
 // 用法（注册入口是 `Server::Builder::route_on`）：
 //     class User
 //     {
 //     public:
-//         Get<"/health"> health(const http::Request&);
-//         Post<"/submit/{id}"> submit(Param<int> id, const http::Request&);
+//         asio::awaitable<void> health(Get<"/health"> req, http::Response& res);
+//         asio::awaitable<void> submit(Post<"/submit/{id}"> req, http::Response& res);
 //     };
-// 机制：① `Endpoint` 自身就是协程返回类型（靠下面的 coroutine_traits 特化）；
-//       ② 注册时从成员指针取出动词 / 路径 / 形参表，`Param<T>` 按**位置**吃第 N 个命名捕获。
+//     路径参数在 handler 内按名字取：`auto id = req.param<int, "id">();`
+// 机制：① **声明写在第一个形参**（`Get<P>` 既是路由声明、也是请求类型）⇒ 协程返回类型自由；
+//       ② 注册时从成员指针取出动词 / 路径 / 形参表；命名捕获由 `Request::param<T, "名字">()` 自取。
 
 enum class Verb : std::uint8_t
 {
@@ -749,73 +750,100 @@ enum class Verb : std::uint8_t
 	return "";
 }
 
-// 既是路由声明，也是协程返回对象：`get_return_object()` 产出的 awaitable 由转换构造器接住。
+// 一条路由的请求：既是**路由声明**（verb + pattern 在编译期），也带**本次请求的数据**。
+// 声明住在形参位置 ⇒ 协程返回类型自由 —— 不再需要 `coroutine_traits` 特化，也没有 `release()`。
 template <Verb verb, FixedString pattern>
-class Endpoint
+struct Request
 {
-public:
-	using Inner = asio::awaitable<http::Response, asio::any_io_executor>;
-
-	Endpoint(Inner inner) noexcept : inner(std::move(inner)) {}
-	Endpoint(Endpoint&&) noexcept = default;
-
 	static constexpr Verb method = verb;
 	static constexpr auto literal = pattern; // 可当模板实参（按成员逐项结构等价）
 	static constexpr std::string_view route_pattern = pattern.view();
 
-	// asio 的 frame 用 await_transform 收口、只认自家 awaitable，且先做模板推导（隐式转换无效）→
-	// 不能直接 `co_await Endpoint`，必须先取出内部 awaitable。
-	[[nodiscard]] Inner release() && noexcept { return std::move(inner); }
+	// 命名捕获在 pattern 里的下标；没这个名字 → `params().size()`（越界，正是 `param()` 用来拦错的判据）。
+	// ⚠️ 不能用 static 局部变量存 `Pattern`（`params()` 的 span 指向它，而 constexpr 函数不许有静态变量）。
+	[[nodiscard]] static constexpr std::size_t slot_of(std::string_view name) noexcept
+	{
+		const Pattern<pattern> parsed{};
+		const std::span<const std::string_view> names = parsed.params();
+		for(std::size_t i = 0; i < names.size(); ++i)
+			if(names[i] == name) return i;
+		return names.size();
+	}
 
-private:
-	Inner inner;
+	const http::Request& raw; // 框架解析出来的 start line + headers（+ 体；交棒落地后改由 handler 按需读）
+	std::span<const Capture> captures; // 本次匹配出的命名捕获，生存期覆盖 handler 执行期间
+
+	// 按名字取命名捕获 —— 名字在**编译期**对着 pattern 校对（写错就编不过）。
+	// 整数走 `from_chars`（与旧的位置注入同语义：转换失败静默给 0）；string_view 直通。
+	template <class T, FixedString name>
+	[[nodiscard]] constexpr T param() const noexcept
+	{
+		constexpr std::size_t slot = slot_of(name.view());
+		static_assert(slot < Pattern<pattern>{}.params().size(), "路由声明：路径里没有这个名字的命名捕获");
+
+		const std::string_view text = slot < captures.size() ? captures[slot].value : std::string_view{};
+
+		if constexpr(std::is_same_v<T, std::string_view>)
+		{
+			return text;
+		}
+		else if constexpr(std::is_integral_v<T>)
+		{
+			T value{};
+			std::from_chars(text.data(), text.data() + text.size(), value);
+			return value;
+		}
+		else
+		{
+			static_assert(!sizeof(T), "路由注入：param<> 目前只支持整数与 string_view");
+		}
+	}
 };
 
 template <FixedString pattern>
-using Get = Endpoint<Verb::get, pattern>;
+using Get = Request<Verb::get, pattern>;
 template <FixedString pattern>
-using Post = Endpoint<Verb::post, pattern>;
+using Post = Request<Verb::post, pattern>;
 template <FixedString pattern>
-using Put = Endpoint<Verb::put, pattern>;
+using Put = Request<Verb::put, pattern>;
 template <FixedString pattern>
-using Delete = Endpoint<Verb::del, pattern>;
+using Delete = Request<Verb::del, pattern>;
 template <FixedString pattern>
-using Head = Endpoint<Verb::head, pattern>;
+using Head = Request<Verb::head, pattern>;
 template <FixedString pattern>
-using Options = Endpoint<Verb::options, pattern>;
+using Options = Request<Verb::options, pattern>;
 template <FixedString pattern>
-using Patch = Endpoint<Verb::patch, pattern>;
+using Patch = Request<Verb::patch, pattern>;
 
-// 注入载体：第 N 个 `Param<T>` 吃第 N 个命名捕获；名字可选，写了就在编译期跟 pattern 校对。
-template <class T, FixedString name = "">
-struct Param
-{
-	using Value = T;
-	static constexpr std::string_view param_name = name.view();
-	T value{};
-};
-
+// 形参类型分类（`make_arg` 与编译期诊断用）
 template <class>
-struct IsParam : std::false_type
+struct IsRouteRequest : std::false_type
 {
 };
 
-template <class T, FixedString name>
-struct IsParam<Param<T, name>> : std::true_type
+template <Verb verb, FixedString pattern>
+struct IsRouteRequest<Request<verb, pattern>> : std::true_type
 {
 };
 
 // 成员指针 → 动词 / 路径 / 形参表。分解交给 jk 的 `Callable`：它覆盖 cv(4) × ref(3) × noexcept(2)
 // 全组合（手写偏特化只匹配裸形式 `R (C::*)(Ps...)`），而 `Arguments` 是带算法的 `TList`。
+// 动词 + pattern 从**第一个形参**取 —— 声明就住在那里（见上面的 `Request`）。
 template <class Pmf>
 struct RouteOf
 {
-	using Result = JK::Meta::Return<Pmf>;
+	using Result = JK::Meta::Return<Pmf>; // 应当是 `asio::awaitable<void>`
 	using Params = JK::Meta::Arguments<Pmf>;
+	using Route = typename Params::First; // 第一个形参：`Get<…>` / `Post<…>` / …
 
-	static constexpr Verb verb = Result::method;
-	static constexpr auto pattern = Result::literal;
-	static constexpr std::string_view pattern_view = Result::route_pattern;
+	static_assert(IsRouteRequest<Route>::value,
+				  "路由声明：第一个形参必须是 `Get<\"…\">` / `Post<\"…\">` 这样的请求类型（声明写在形参位置）");
+	static_assert(std::is_same_v<Result, asio::awaitable<void>>,
+				  "路由声明：handler 必须返回 `asio::awaitable<void>`（响应按引用填，见 http-server-plan.md §4.1.1）");
+
+	static constexpr Verb verb = Route::method;
+	static constexpr auto pattern = Route::literal;
+	static constexpr std::string_view pattern_view = Route::route_pattern;
 };
 
 // 故意不定义：实例化它就是为了让编译错误里出现这两条冲突的 pattern。
@@ -882,60 +910,13 @@ template <FixedString... Ps>
 	return build<Ps...>();
 }
 
-// 形参表里 `Param<>` 的个数
-template <class Params>
-struct ParamCount;
-
-template <class... Ps>
-struct ParamCount<JK::Meta::TList<Ps...>>
-	: std::integral_constant<std::size_t,
-							 (std::size_t{0} + ... + (IsParam<Ps>::value ? std::size_t{1} : std::size_t{0}))>
-{
-};
-
-// 第 index 个形参吃第几个捕获 = 它**前面**有多少个 `Param<>`（`Slice<0, index>` 就是“前面那些形参”）。
-template <std::size_t index, class Params>
-struct SlotOf : ParamCount<typename Params::template Slice<0, index>>
-{
-};
-
-// 带名字的 `Param<T, "id">` 与 pattern 第 N 个捕获名做编译期校对
-template <std::size_t index, class Pmf>
-constexpr void check_param_name() noexcept
-{
-	using Params = typename RouteOf<Pmf>::Params;
-	using P = typename Params::template At<index>;
-
-	if constexpr(IsParam<P>::value)
-	{
-		constexpr auto slot = SlotOf<index, Params>::value;
-		// 直接用临时对象取值，不要把 params() 的 span 存下来（它指向临时对象的成员）
-		static_assert(Pattern<RouteOf<Pmf>::pattern>{}.params().size() > slot,
-					  "路由声明：Param<> 的序号超出了路径里的命名捕获");
-
-		if constexpr(!P::param_name.empty())
-			static_assert(P::param_name == Pattern<RouteOf<Pmf>::pattern>{}.params()[slot],
-						  "路由声明：Param 的名字与路径里对应位置的捕获名不一致（位置注入按顺序配对）");
-	}
-}
-
-template <class Pmf, std::size_t... indices>
-constexpr void check_all_param_names(std::index_sequence<indices...>) noexcept
-{
-	(check_param_name<indices, Pmf>(), ...);
-}
-
-// 编译期校验一条路由声明（`route_on` 里调用即可触发）
+// 编译期校验一条路由声明（`route_on` 里调用即可触发）。
+// ⚠️ 命名捕获的**读取**不再能在这里校验 —— 改由 handler 里的 `req.param<T, "名字">()` 就地校对
+// （更精确：错在写的那一行；代价是“pattern 里的名字没人读”不再算错）。
 template <class Pmf>
 constexpr void validate_route() noexcept
 {
-	using Params = typename RouteOf<Pmf>::Params;
-
 	static_assert(Pattern<RouteOf<Pmf>::pattern>{}.ok(), "路由声明：路径 pattern 语法不合法（错误码见 Pattern::err / to_string）");
-	static_assert(ParamCount<Params>::value == Pattern<RouteOf<Pmf>::pattern>{}.params().size(),
-				  "路由声明：Param<> 的个数必须等于路径里的命名捕获个数");
-
-	check_all_param_names<Pmf>(std::make_index_sequence<Params::size()>{});
 }
 
 // 一组的（动词, pattern）清单与冲突判定结果。⚠️ 必须是**静态**成员：`find_table_conflict`
@@ -966,32 +947,28 @@ constexpr void validate_group() noexcept
 	}
 }
 
-// 造一个注入实参：`Param<T>` 取第 slot 个捕获的值（整数用 from_chars，string_view 直通）；其余形参拿 request。
+// 造一个注入实参，按形参类型分两类：
+//   `Get<…>` 这类请求类型 → 包一份请求（引用 + 本次捕获；路径参数由 handler 用 `req.param<…>()` 自取）
+//   `http::Response&`    → 框架持有的响应对象，handler 往里填
 template <std::size_t index, class Pmf>
-[[nodiscard]] decltype(auto) make_arg(const http::Request& request, std::span<const Capture> captures)
+[[nodiscard]] decltype(auto) make_arg(
+	const http::Request& request, http::Response& response, std::span<const Capture> captures
+)
 {
 	using Params = typename RouteOf<Pmf>::Params;
 	using P = typename Params::template At<index>;
 
-	if constexpr(IsParam<P>::value)
+	if constexpr(IsRouteRequest<P>::value)
 	{
-		constexpr auto slot = SlotOf<index, Params>::value;
-		const std::string_view text = slot < captures.size() ? captures[slot].value : std::string_view{};
-		using V = typename P::Value;
-		V value{};
-
-		if constexpr(std::is_same_v<V, std::string_view>)
-			value = text;
-		else if constexpr(std::is_integral_v<V>)
-			std::from_chars(text.data(), text.data() + text.size(), value);
-		else
-			static_assert(!sizeof(V), "路由注入：Param<> 目前只支持整数与 string_view");
-
-		return P{value};
+		return P{request, captures};
+	}
+	else if constexpr(std::is_same_v<std::remove_cvref_t<P>, http::Response>)
+	{
+		return response;
 	}
 	else
 	{
-		return request;
+		static_assert(!sizeof(P), "路由注入：形参只能是 Get<…>（第 0 个）/ http::Response&");
 	}
 }
 
@@ -1007,7 +984,9 @@ template <class C, class F, std::size_t... indices>
 		if(match(tree, request.path, captures) == k_no_route)
 			co_return http::Response{500, "text/plain; charset=utf-8", {}, "路由派发：组命中但单条 pattern 未命中\n"};
 
-		co_return co_await (self->*pmf)(make_arg<indices, F>(request, captures)...).release();
+		http::Response response; // 框架持有；handler 通过 `http::Response&` 形参往这里填
+		co_await (self->*pmf)(make_arg<indices, F>(request, response, captures)...);
+		co_return response;
 	};
 }
 
@@ -1068,325 +1047,5 @@ template <class C, class... Pmf>
 	add_verb_routes<Verb::patch>(routes, self, pmf...);
 	return routes;
 }
-
-} // namespace pylai::route
-
-export namespace std {
-
-// 只多一行：把 promise 指向 asio 的 frame，于是 `Endpoint` 可以直接当协程返回类型。
-// ⚠️ 必须写在**任何用到它的协程之前**（特化在协程定义点查找），且只能在全局 `std` 里。
-template <pylai::route::Verb verb, pylai::route::FixedString pattern, class... Args>
-struct coroutine_traits<pylai::route::Endpoint<verb, pattern>, Args...>
-{
-	using promise_type = asio::awaitable_frame<pylai::http::Response, asio::any_io_executor>;
-};
-
-} // namespace std
-
-export namespace pylai::route {
-
-// ───── 编译期用例 ─────────────────────────────────────────────────
-// 具名常量，兼作**语法示例**；`static_assert` 在每次构建时验证。
-namespace selftest {
-
-// 精确匹配
-inline constexpr Pattern<"/health"> health{};
-inline constexpr Pattern<"/api/v1/echo"> echo{};
-
-// 路径参数
-inline constexpr Pattern<"/api/v1/users/{id}"> user_by_id{};
-inline constexpr Pattern<"/api/v1/users/{id}/posts/{post_id}"> user_post{};
-
-// 全捕获 / 子树（尾斜杠 = 匿名 `...`）
-inline constexpr Pattern<"/files/{path...}"> files_tree{};
-inline constexpr Pattern<"/static/"> static_tree{};
-
-// 精确尾 `{$}`
-inline constexpr Pattern<"/{$}"> root_only{};
-inline constexpr Pattern<"/a/{$}"> a_only{};
-
-} // namespace selftest
-
-static_assert(selftest::health.count == 1 && selftest::health.kind(0) == SegKind::literal);
-static_assert(selftest::echo.count == 3);
-static_assert(selftest::user_by_id.count == 4 && selftest::user_by_id.text(3) == "id");
-static_assert(selftest::user_post.count == 6 && selftest::user_post.text(5) == "post_id");
-static_assert(selftest::files_tree.count == 2 && selftest::files_tree.kind(1) == SegKind::catch_all &&
-			  selftest::files_tree.text(1) == "path");
-static_assert(selftest::static_tree.count == 2 && selftest::static_tree.kind(1) == SegKind::catch_all);
-static_assert(selftest::root_only.count == 1 && selftest::root_only.kind(0) == SegKind::end_mark);
-static_assert(selftest::a_only.count == 2 && selftest::a_only.kind(1) == SegKind::end_mark);
-
-// 根："/" → 匿名全捕获（匹配一切）
-static_assert(Pattern<"/">{}.count == 1 && Pattern<"/">{}.kind(0) == SegKind::catch_all);
-// 尾斜杠 = 子树
-static_assert(Pattern<"/a/">{}.count == 2 && Pattern<"/a/">{}.kind(1) == SegKind::catch_all);
-
-// —— 数组维度是**紧**的（segment_count = count('/')，name_count = count('{')），不再按 raw 长度过分配 ——
-static_assert(Pattern<"/health">::segment_count == 1 && Pattern<"/health">::name_count == 0);
-static_assert(Pattern<"/api/v1/echo">::segment_count == 3 && Pattern<"/api/v1/echo">::name_count == 0);
-static_assert(Pattern<"/files/{path...}">::segment_count == 2 && Pattern<"/files/{path...}">::name_count == 1);
-static_assert(Pattern<"/api/v1/users/{id}/posts/{post_id}">::segment_count == 6 &&
-			  Pattern<"/api/v1/users/{id}/posts/{post_id}">::name_count == 2);
-// `{$}` 是匿名的 → 会占一个 `{` 但**不进** names（多算一个维度，无妨）
-static_assert(Pattern<"/a/{$}">::name_count == 1 && Pattern<"/a/{$}">{}.params().empty());
-
-// —— 参数提取：按出现顺序，匿名占位符不计入 ——
-static_assert(Pattern<"/health">{}.params().empty());
-static_assert(Pattern<"/users/{id}">{}.params().size() == 1 && Pattern<"/users/{id}">{}.params()[0] == "id");
-static_assert(Pattern<"/users/{id}/posts/{pid}">{}.params().size() == 2 &&
-			  Pattern<"/users/{id}/posts/{pid}">{}.params()[1] == "pid");
-static_assert(Pattern<"/files/{path...}">{}.params().size() == 1 &&
-			  Pattern<"/files/{path...}">{}.params()[0] == "path");
-static_assert(Pattern<"/">{}.params().empty());		// 匿名全捕获
-static_assert(Pattern<"/a/">{}.params().empty());		// 尾斜杠子树
-static_assert(Pattern<"/a/{$}">{}.params().empty());	// 精确尾
-static_assert(selftest::user_post.params().size() == 2 && selftest::user_post.params()[0] == "id" &&
-			  selftest::user_post.params()[1] == "post_id");
-
-// ── DSL：成员指针抽取 + 位置注入 + 名字校对（协程本体由应用侧验证）──
-namespace dsl_selftest {
-
-struct User
-{
-	Get<"/health"> health(const http::Request&);
-	Post<"/submit/{id}"> submit(Param<int, "id"> id, const http::Request&);
-	Get<"/files/{path...}"> files(Param<std::string_view, "path"> path, const http::Request&);
-};
-
-using Health = RouteOf<decltype(&User::health)>;
-using Submit = RouteOf<decltype(&User::submit)>;
-using Files = RouteOf<decltype(&User::files)>;
-
-static_assert(Health::verb == Verb::get && Health::pattern_view == "/health");
-static_assert(Submit::verb == Verb::post && Submit::pattern_view == "/submit/{id}");
-static_assert(Files::verb == Verb::get && Files::pattern_view == "/files/{path...}");
-
-static_assert(ParamCount<Health::Params>::value == 0);
-static_assert(ParamCount<Submit::Params>::value == 1);
-static_assert(SlotOf<0, Submit::Params>::value == 0);
-static_assert(SlotOf<1, Submit::Params>::value == 1); // request 占形参位，但不吃捕获
-static_assert(std::is_same_v<typename Submit::Params::template At<0>, Param<int, "id">>);
-
-// 换用 jk 的 `Callable` 白拿的能力：cv / noexcept 形式的成员指针也能当路由声明
-// （旧的手写偏特化只匹配 `R (C::*)(Ps...)` —— 反证见 `.vscode/tmp/jk-callable-probe/old-trait.cpp`）。
-struct QualifiedUser
-{
-	Get<"/c"> ping(const http::Request&) const;
-	Post<"/n/{id}"> post(Param<int, "id"> id, const http::Request&) noexcept;
-};
-
-using ConstPing = RouteOf<decltype(&QualifiedUser::ping)>;
-using NothrowPost = RouteOf<decltype(&QualifiedUser::post)>;
-
-static_assert(ConstPing::verb == Verb::get && ConstPing::pattern_view == "/c");
-static_assert(NothrowPost::verb == Verb::post && NothrowPost::pattern_view == "/n/{id}");
-static_assert(SlotOf<1, NothrowPost::Params>::value == 1);
-
-// 触发三条声明的编译期校验（Param 个数 / 名字 / pattern 合法性）
-inline constexpr bool validated =
-	(validate_route<decltype(&User::health)>(), validate_route<decltype(&User::submit)>(),
-	 validate_route<decltype(&User::files)>(), true);
-static_assert(validated);
-
-// 强制实例化整条注册链（只求编译，不调用）：make_routes → make_handler → make_arg + build<...>()
-inline void instantiate_chain()
-{
-	[[maybe_unused]] auto routes =
-		make_routes(static_cast<User*>(nullptr), &User::health, &User::submit, &User::files);
-	[[maybe_unused]] auto qualified =
-		make_routes(static_cast<QualifiedUser*>(nullptr), &QualifiedUser::ping, &QualifiedUser::post);
-}
-
-} // namespace dsl_selftest
-
-// —— 错误路径：以下每一条都必须被拦下 ——
-static_assert(Pattern<"/a/{x...}/b">{}.err == ParseError::catch_all_not_last);
-static_assert(Pattern<"/a/{x}/{x}">{}.err == ParseError::duplicate_param);
-static_assert(Pattern<"/a//b">{}.err == ParseError::empty_segment);
-static_assert(Pattern<"/a/{}">{}.err == ParseError::empty_param_name);
-static_assert(Pattern<"/a/b{c}">{}.err == ParseError::orphan_brace);
-static_assert(Pattern<"users/{id}">{}.err == ParseError::must_start_with_slash);
-
-// —— 现状钉死（不是期望值，是"防止无意改变"的特征测试）——
-// `{...}` 会落到普通参数分支，成为**名为 "..." 的参数**，而不是 Go 的匿名全捕获
-static_assert(Pattern<"/a/{...}">{}.count == 2 && Pattern<"/a/{...}">{}.kind(1) == SegKind::param &&
-			  Pattern<"/a/{...}">{}.text(1) == "...");
-// `{{` / `}}` 转义**尚未实现**，字面量里写不出花括号：
-//   `/a/b{c}`（`{` 不在段首）→ orphan_brace
-//   `/a/{{b}}`（`{` 在段首、`}` 在段尾）→ 先当通配符，再因名字含 `{` → bad_param_name
-static_assert(Pattern<"/a/b{c}">{}.err == ParseError::orphan_brace);
-static_assert(Pattern<"/a/{{b}}">{}.err == ParseError::bad_param_name);
-
-namespace conflict_selftest {
-
-inline constexpr auto by_name = Pattern<"/api/v1/users/{name}">{};
-inline constexpr auto by_id_posts = Pattern<"/api/v1/users/{id}/posts">{};
-inline constexpr auto files_slash = Pattern<"/files/">{};
-inline constexpr auto files_named = Pattern<"/files/{p...}">{};
-inline constexpr auto wild_one = Pattern<"/a/{x}">{};
-inline constexpr auto wild_rest = Pattern<"/a/{y...}">{};
-inline constexpr auto diverge_param = Pattern<"/a/{x}/c">{};
-inline constexpr auto diverge_literal = Pattern<"/a/b/{y}">{};
-inline constexpr auto exact_end = Pattern<"/a/{$}">{};
-
-// 指定 method 时两条路由是否冲突。
-[[nodiscard]] constexpr bool conflicts_as(std::string_view method_a, PatternView a, std::string_view method_b, PatternView b)
-{
-	const std::string_view methods[] = {method_a, method_b};
-	const PatternView both[] = {a, b};
-	return !find_table_conflict(methods, both).ok();
-}
-
-[[nodiscard]] constexpr bool conflicts(PatternView a, PatternView b) { return conflicts_as("GET", a, "GET", b); }
-
-static_assert(conflicts(selftest::user_by_id.view(), selftest::user_by_id.view())); // 完全重复
-static_assert(conflicts(selftest::user_by_id.view(), by_name.view()));				// 同形异名
-static_assert(conflicts(files_slash.view(), files_named.view()));					// /files/ 与 /files/{p...}
-static_assert(conflicts(wild_one.view(), wild_rest.view()));						// 两个通配符抢同一段
-static_assert(conflicts(wild_rest.view(), exact_end.view()));						// catch_all 抢走 {$} 的 "/"
-static_assert(!conflicts(selftest::user_by_id.view(), by_id_posts.view()));			// 前缀相同但更长
-static_assert(!conflicts(diverge_param.view(), diverge_literal.view()));			// 分歧点有字面量 → 放行
-static_assert(!conflicts(wild_one.view(), exact_end.view()));						// param 捕不到空段
-
-// 同 pattern、不同 method → 不是冲突（靠“每 method 一棵树”各走各的）
-static_assert(!conflicts_as("GET", selftest::user_by_id.view(), "POST", selftest::user_by_id.view()));
-
-} // namespace conflict_selftest
-
-namespace match_selftest {
-
-// 整棵树现在是**编译期常量**：节点数进类型 + 扁平数组 + 零堆分配。
-// 槽位 = 下面 pattern 的出现顺序。
-inline constexpr auto shared = build<
-	"/health",
-	"/api/v1/echo",
-	"/api/v1/users/{id}",
-	"/files/{path...}",
-	"/a/{$}",
-	"/api/v1/user",
-	"/files/static">();
-
-// 「先算」算出的精确规模 == 实际填满的规模（两边都得刚好用满）
-static_assert(shared.node_count == shared.nodes.size());
-static_assert(shared.edge_count == shared.edges.size());
-
-[[nodiscard]] constexpr std::uint32_t hit(std::string_view path)
-{
-	std::vector<Capture> caps;
-	return match(shared, path, caps);
-}
-
-// 压缩验收：/api/v1/echo 与 /api/v1/users/{id} 只在字符级共享前缀，
-// 所以整棵树只需 5 个节点（root —"/api/v1/"→ 分叉点，分叉点再接 "echo" / "users"）。
-inline constexpr auto compress_tree = build<"/api/v1/echo", "/api/v1/users/{id}">();
-static_assert(compress_tree.node_count == compress_tree.nodes.size());
-
-[[nodiscard]] constexpr bool compresses()
-{
-	if(compress_tree.node_count != 5) return false;
-
-	for(const auto& e : compress_tree.edges)
-		if(e.kind == RadixKind::chars && e.label == "/api/v1/") return true;
-
-	return false;
-}
-
-// `/` 与 `{$}` 必须分开建树（`/` 与 `/{$}` 本身就冲突，而且 `/` 会吞掉所有 404 用例）。
-inline constexpr auto root_any_tree = build<"/">();
-inline constexpr auto root_end_tree = build<"/{$}", "/a/{$}">();
-
-[[nodiscard]] constexpr std::uint32_t hit_root_any(std::string_view path)
-{
-	std::vector<Capture> caps;
-	return match(root_any_tree, path, caps);
-}
-
-[[nodiscard]] constexpr std::uint32_t hit_root_end(std::string_view path)
-{
-	std::vector<Capture> caps;
-	return match(root_end_tree, path, caps);
-}
-
-} // namespace match_selftest
-
-static_assert(match_selftest::hit("/health") == 0);
-static_assert(match_selftest::hit("/api/v1/echo") == 1);
-static_assert(match_selftest::hit("/api/v1/users/42") == 2);
-static_assert(match_selftest::hit("/api/v1/user") == 5);
-static_assert(match_selftest::hit("/files/a/b/c") == 3);
-static_assert(match_selftest::hit("/files/") == 3);
-static_assert(match_selftest::hit("/a/") == 4);
-
-// 静态优先：/files/static 羸过 /files/{path...}；其余段回退给 catch_all
-static_assert(match_selftest::hit("/files/static") == 6);
-static_assert(match_selftest::hit("/files/other") == 3);
-// 回溯：字面量边走到了底、但路径没走完 → 让给 catch_all
-static_assert(match_selftest::hit("/files/static/x") == 3);
-
-// 下面每一条都应落空（404）
-static_assert(match_selftest::hit("/files") == k_no_route);
-static_assert(match_selftest::hit("/a") == k_no_route);
-static_assert(match_selftest::hit("/api/v1/users/") == k_no_route);
-static_assert(match_selftest::hit("/api/v1/users") == k_no_route);
-static_assert(match_selftest::hit("/api/v1/users/42/posts") == k_no_route);
-static_assert(match_selftest::hit("/health/") == k_no_route);
-static_assert(match_selftest::hit("/nope") == k_no_route);
-
-// 字符级压缩生效
-static_assert(match_selftest::compresses());
-
-// `/`：匿名全捕获，匹配一切（但空路径不行）
-static_assert(match_selftest::hit_root_any("/") == 0);
-static_assert(match_selftest::hit_root_any("/a/b") == 0);
-static_assert(match_selftest::hit_root_any("") == k_no_route);
-
-// `{$}`：只钉住“恰好到此为止”
-static_assert(match_selftest::hit_root_end("/") == 0);
-static_assert(match_selftest::hit_root_end("/a/") == 1);
-static_assert(match_selftest::hit_root_end("/a") == k_no_route);
-static_assert(match_selftest::hit_root_end("/a/b") == k_no_route);
-
-static_assert([] {
-	std::vector<Capture> caps;
-	return match(match_selftest::shared, "/api/v1/users/42", caps) == 2 && caps.size() == 1 &&
-		   caps[0].name == "id" && caps[0].value == "42";
-}());
-
-static_assert([] {
-	std::vector<Capture> caps;
-	return match(match_selftest::shared, "/files/a/b", caps) == 3 && caps.size() == 1 &&
-		   caps[0].name == "path" && caps[0].value == "a/b";
-}());
-
-static_assert([] {
-	std::vector<Capture> caps;
-	return match(match_selftest::shared, "/files/", caps) == 3 && caps.size() == 1 &&
-		   caps[0].value.empty();
-}());
-
-static_assert([] {
-	std::vector<Capture> caps;
-	return match(match_selftest::shared, "/files/static/x", caps) == 3 && caps.size() == 1 &&
-		   caps[0].name == "path" && caps[0].value == "static/x";
-}());
-
-// FixedString::substr<Pos, End>()：半开区间 [Pos, End)
-static_assert(FixedString{"abcdef"}.substr<1, 3>().view() == "bc");
-static_assert(FixedString{"abcdef"}.substr<0, 6>().view() == "abcdef");
-static_assert(FixedString{"abcdef"}.substr<3, 6>().view() == "def");
-static_assert(FixedString{"abcdef"}.substr<2, 2>().view().empty());
-static_assert(FixedString{"/api/v1/users"}.substr<0, 4>().view() == "/api");
-
-// 关键：结果是**独立类型**，可以直接当 NTTP 交给 Pattern<...> —— 这正是
-// `FixedString{string_view}` 做不到的事（探针 probe_fail.cpp 验过：推不出 N）。
-// ⚠️ 但 pattern 必须先以 '/' 开头，所以要用 substr 递归时，切出来的子串**得带上前导 '/'**，
-//    否则 Pattern 直接解析失败（count == 0）。
-static_assert(Pattern<FixedString{"/a/{x}/b"}.substr<0, 6>()>{}.count == 2);
-static_assert(Pattern<FixedString{"/a/{x}/b"}.substr<0, 6>()>{}.kind(1) == SegKind::param);
-static_assert(Pattern<FixedString{"/api/v1/users"}.substr<0, 7>()>{}.count == 2);
-static_assert(Pattern<FixedString{"/api/v1/users"}.substr<0, 7>()>{}.text(1) == "v1");
-// 反例：切掉前导 '/' → 解析失败，count 为 0
-static_assert(Pattern<FixedString{"/a/{x}/b"}.substr<1, 6>()>{}.count == 0);
 
 } // namespace pylai::route

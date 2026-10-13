@@ -5,6 +5,22 @@
 
 ## 2026-10-13
 
+- **`Param<>` 变成 `Request` 的成员函数；静态用例搬出模块** ✅ —— 两件事同一动机：声明搬到第一个形参后，
+  请求对象本身就带捕获（`Request` 新增 `std::span<const Capture> captures`），路径参数不必再占一个形参位。
+  `req.param<T, "名字">()`：名字**必写**，`slot_of("名字")` 在编译期算出下标（`static_assert` 拦错，`from_chars` 语义与旧的相同）；
+  ✅ **删掉** `Param` / `IsParam` / `ParamCount` / `SlotOf` / `check_param_name` / `validate_route` 里的计数与名字校对。
+  ⚠️ 代价：“pattern 里的名字没人读”不再算错（读取在 handler 体内，编译期看不到）。
+  ✅ 编译期用例整体搬到 **`tests/route_static.cpp`**（99 条 `static_assert`，`route.cppm` 从 1361 行降到 1051 行）——
+  它只走 `import pylai;` 的**导出面**，顺带验收“该导出的都导出了”；`tests/CMakeLists.txt` 的 GLOB 自动收，无需改 CMake。
+  复核：`cmake --build --preset debug_llvm`（构建过 = 用例过）→ `./tests/run.sh` 22/22，用例文件一字未改。
+
+- **架构变更①落地：声明搬到第一个形参** ✅ —— `asio::awaitable<void> handle(Get<"/health"> req, http::Response& res)`。
+  `Endpoint`（住在返回类型位置的声明）换成 `Request<verb,pattern>`（**请求类型**，持 `http::Request& raw`）；`RouteOf` 改从 `Ps...[0]` 取声明；
+  `make_arg` 按形参类型分三类（请求 / `Param<>` / `Response&`）；`make_handler` 直接 `co_await` handler，响应由框架持有并返回。
+  ✅ **删掉**：`std::coroutine_traits` 特化、`Inner`、`release()`、以及绕 `await_transform` 模板推导的那段注释 —— 整个 DSL 里最拐的一处没了。
+  验收：**`./tests/run.sh` 22/22，且 `tests/http_e2e.py` 一字未改**（“运行期行为零变化”的可验证形态）；新增两条编译期诊断。
+  ⚠️ 消费方现在要自己 `import asio;`（已记进 `modules.md`）。`routing.md` §1 重写。
+
 - **目标结构重排：四层目标 + 两根轴 + MU 里程碑** 🟡 —— 用户澄清三点：clio **尚未施工**（⇒ 框架形态自由）、但另有**公网内容供应**等消费者（需求差异大 ⇒ 动态调优的由来）、且承认**想法太多导致迟迟达不到最小可用**。
   §1 重写为四层：①**为什么做**（场景自适应 —— 是差异化，不是收尾）②**质量底线**（把"不亏欠"翻译成三条可验收：性能**无结构性劣势** / 易用性**形式能改** / 功能覆盖 = **每个缺口有名字 + 挂点**）③**地基**（协议基线 · 框架形态 = 两根轴）④**§1.5 留白清单**。
   §1.4 非目标定案：**不做多机，但要生产级健壮性**；§1.6：clio 从【定】降为"**第一个消费者**"。

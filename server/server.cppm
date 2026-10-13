@@ -51,11 +51,12 @@ public:
 		Builder& max_body_bytes(std::size_t bytes);
 
 		// 声明式注册：`builder.bind(...).route_on(&app, &App::health, &App::submit).build()`。
-		// 动词 / 路径 / 形参表全从成员指针取（返回类型是 route::Endpoint<...>，形参里的 Param<> 按位置吃捕获）。
+		// 动词 / pattern 全从成员指针的**第一个形参**取（`Get<P>` 既是声明也是请求类型）；
+		// 路径参数由 handler 自己用 `req.param<T, "名字">()` 取。
 		template <class C, class... Pmf>
 		[[nodiscard]] Configured route_on(C* self, Pmf... pmf)
 		{
-			(route::validate_route<Pmf>(), ...); // 单条：Param 个数 / 名字 / pattern 合法性
+			(route::validate_route<Pmf>(), ...); // 单条：pattern 合法性（名字校对挪到 `param()` 的调用点）
 			route::validate_group<Pmf...>();	 // 组内：同一 method 下不得有两条路由争抢同一路径
 			routes.set_routes(route::make_routes(self, pmf...));
 			return Configured{std::move(settings), std::move(routes)};

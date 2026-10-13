@@ -43,7 +43,7 @@
 | 维度 | 什么算不亏欠 | 第一阶段（MU）只需 |
 |---|---|---|
 | 性能 | **无结构性劣势**：路径零拷贝 · 每请求分配次数可数 · 热路径无 `std::function` 二次间接 | 达到并**记录数字**（不追平 hical） |
-| 易用性 | 声明式注册 + 位置注入 + **编译期**拦错；形式不满意要**能改**（这正是“形态自由”的用法） | 形态定形（§4.1.1 / §11.2 C） |
+| 易用性 | 声明式注册 + **编译期**拦错（含 `param<T,"名字">()` 的名字校对）；形式不满意要**能改**（这正是“形态自由”的用法） | 形态定形（§4.1.1 / §11.2 C） |
 | 功能覆盖 | 不是“现在都有”，而是**每个缺口有名字 + 一个明确挂点**（见 §1.5） | 留白清单成文 |
 
 ### 1.4 非目标（✅ 2026-10-13 定）
@@ -207,11 +207,11 @@ asio::awaitable<void> handle(Get<"/health"> req, FileResponse& res);
 | 动词 + pattern 从**返回类型**位置挪到**第一个形参** | `Get<P>` / `Post<P>` 变成“这条路由的**请求类型**”，不再是协程返回对象 |
 | ✅ **随带的大简化** | 返回类型自由后，`Endpoint` 不再是协程返回类型 → `route.cppm` 尾部那个 `std::coroutine_traits` 特化、`release()`、以及绕 `await_transform` 模板推导的注释**全部可以删掉**（这是整个 DSL 里最拐的一处） |
 | **响应类型多种**（beast 式） | handler 用形参**声明它产出哪种响应**；“流式”不再是一个 `stream()` 方法，而是**一种响应类型**（`FileResponse` 自带长度 → 仍可算 `Content-Length`；只有真正未知长度的才需要响应侧 chunked 或 `Connection: close`） |
-| `Param<>` 位置注入 | **不受影响** —— 计数只数 `Param<>`，而标签与响应形参都不是 |
+| `Param<>` 位置注入 | 🔄 **2026-10-13 已删** —— 换成 `req.param<T, "名字">()`（声明搬到形参后，请求对象本身就能带捕获）⇒ `Param` / `ParamCount` / `SlotOf` / 名字校对一并删掉；名字改为在**调用点**对照 pattern 校对 | ✅ |
 | `RouteOf` | 改从 `Ps...[0]` 取 `::method` / `::literal`（原先从返回类型 `R` 取） |
 | **`req` 的语义** | ✅ **请求本身**，不是标签 → 读体接口就挂在它上面（`req.body()` / `req.read_some(buf)`），**不需要额外的 exchange 形参** |
 | **写响应** | ✅ **框架发**：handler 只**填** `res`，返回后框架发；**发法由响应类型决定**（下一格） |
-| 返回类型 | `asio::awaitable<void>`；**未拍板** —— 响应走形参，所以返回类型理论上还能带信息，但“两种怎么应答的风格并存”很危险 | 🟡 |
+| 返回类型 | ✅ 定为 `asio::awaitable<void>`（响应走形参；**不做**“两种应答风格并存”）| ✅ |
 | `res` 的所有权 | ✅ **按引用传**（用户 2026-10-13）—— 对象由框架持有，handler 往里填；于是“框架发”才成立（按值传的话副本随协程帧一起销毁） | ✅ 定 |
 
 **第一阶段要立的响应类型**（用户 2026-10-13 定，累积读）：
@@ -534,20 +534,21 @@ $\sigma$ = 争用项，$\kappa$ = 一致性项（**拐点后吞吐反而下降**
 >
 > 📌 **进度（2026-10-13 晚）**：**A / B / C / D 的主体已落地并端到端跑通** ——
 > 代码在 `server/route.cppm`（`pylai::route`）：A 节全部语法（含 `{rest...}` / `{$}` / 尾斜杠子树 / 6 类错误）、
-> 字符级压缩 radix 匹配、声明式 `route_on` 注册与位置注入；接线在 `server/route.cpp` / `server/server.cppm`。
+> 字符级压缩 radix 匹配、声明式 `route_on` 注册与 `req.param<>()` 取参；接线在 `server/route.cpp` / `server/server.cppm`。
+> 编译期用例在 `tests/route_static.cpp`（跟着 `cmake --build` 一起求值）。
 > 验证方式：`cmake --build --preset debug_llvm`（`static_assert` 与用例每次构建都会跑）；端到端证据见 §11.2 C 的落地进度块。
 
-**一句话**：`Get<"...">` 写在**返回类型位置**声明一条路由 → **`constexpr` 构建器**在编译期解析 pattern、
-把整包压成**一棵字符级 radix tree** → 运行期持表匹配；handler 用 `Param<...>` 显式声明要哪些参数，
-**注册点**（`Builder::route_on`）做 pattern ↔ handler 的编译期交叉核对。
+**一句话**：`Get<">...">` 写在**第一个形参**上声明一条路由（它同时就是请求） → **`constexpr` 构建器**在编译期解析 pattern、
+把整包压成**一棵字符级 radix tree** → 运行期持表匹配；路径参数在 handler 里用 `req.param<T, "名字">()` 取，
+**注册点**（`Builder::route_on`）做 pattern ↔ handler 的编译期交叉核对（合法性与冲突）。
 
 ```cpp
 using namespace pylai::route;
 
 struct App
 {
-	Get<"/health"> health(const http::Request& request);
-	Get<"/users/{id}"> user(Param<int, "id"> id, const http::Request& request);
+	asio::awaitable<void> health(Get<"/health"> req, http::Response& res);
+	asio::awaitable<void> user(Get<"/users/{id}"> req, http::Response& res);
 };
 
 App app;
@@ -602,25 +603,27 @@ auto server = pylai::Server::builder()
 > - **每 method 一棵树** ✅（2026-10-13 晚②）：`SelectPatterns` @838 按动词筛 pattern → 每个动词一棵 `build_of()`；
 >   `VerbRoutes` @1033 / `add_verb_routes` / `make_routes` @1074（各树擦成闭包，类型各异也能同放一个 vector）
 >   —— `RouteGroup` 包装层**已删**（2026-10-13 晚③）：`Router` 直接持有 `std::vector<VerbRoutes>`（一个成员，不再是“装一个元素的 vector”）
-> - **位置注入 DSL**：`Verb` @706 · `Endpoint` @734 · `Param` @771 · `RouteOf` @808 · `validate_route` @928 · `make_arg` @969 · `make_handler` @1015 · `coroutine_traits` 特化 @1081 ✅
+> - **声明搬到第一个形参**：`Request<verb,pattern>` @756（`slot_of` @764 · `param` @780）· `IsRouteRequest` @824 ·
+>   `RouteOf` @833 · `validate_route` @917 · `make_arg` @954 · `make_handler` @978 · `VerbRoutes` @996（`server/route.cppm`）✅
 > - **`pmf` 类型萃取改用 jk 的 `Callable`** ✅（2026-10-13 晚④）：`RouteOf<Pmf>` 不再手写偏特化，形参表由 `std::tuple` 换成 `TList`
 >   → **`ParamSlot` 那条递归整块删掉**（`SlotOf<i, L> = ParamCount<L::Slice<0, i>>`）。白拿 cv / ref / noexcept / 变参全组合
 >   （反证：旧写法对 `const` / `noexcept` 成员指针报 "implicit instantiation of undefined template" —— `.vscode/tmp/jk-callable-probe/old-trait.cpp`，`-DWHICH=1/2`）。
 >   ⚠️ 代价：`:route` 现在 `import jk;`（见 `modules.md`），且 `RouteOf<Pmf>::Params` 对外是 `JK::Meta::TList`。
 > - **组级冲突检查（已接线）** ✅：`GroupClash` @942 + `validate_group` @953；冲突时实例化未定义的 `ShadowedRoute<两条 pattern>`
 >   → **编译错误里直接点名**（实测：`ShadowedRoute<FixedString<7>{"/items"}, FixedString<7>{"/items"}>`）
-> - 编译期用例：`selftest` · `conflict_selftest`（含「同 pattern 不同 method 不算冲突」）· `match_selftest` · `dsl_selftest` ✅
+> - 编译期用例：`tests/route_static.cpp`（`selftest` · `dsl_selftest` · `conflict_selftest` · `match_selftest`，一共 99 条 `static_assert`）✅
+>   🔄 **2026-10-13 已从 `route.cppm` 搬出** —— 走 `import pylai;` 的**导出面**，顺带验收“该导出的都导出了”；
 >   `Table` / `On` / `table_selftest` **已删** —— `validate_group` 把它接进了真实注册路径，独立的"手工路由表"没用了
 > - 验证通道：**`tools/clice query`**（`--fresh` = 先重索引/重编译再回答）。命名检查才用 `clice lint`。
 >   `.clang-tidy` 已用 `HeaderFilterRegex` + `ExcludeHeaderFilterRegex` 把范围收窄到本工作区。
 > - **协议层应答（已落地）** ✅：405 / OPTIONS 带 `Allow`（GET 存在时隐含 HEAD）、HEAD 复用 GET 且无体（见 §G）
-> - **未落地 🔍**：运行期重建/切换活跃集合 · `Param` 的**转换失败语义**（现 `from_chars` 失败静默给 0）
+> - **未落地 🔍**：运行期重建/切换活跃集合 · `param<T, "名字">()` 的**转换失败语义**（现 `from_chars` 失败静默给 0）
 
 #### C. 结构与实现
 
 | 项 | 决定 | 状态 |
 |---|---|---|
-| **粒度分工** | **🔄 修订（2026-10-12 晚，用户明确）**：**两阶段两种粒度**。<br>**编译期**（校验 + **参数提取**）= **段级**：用 `PatternView` 的段序列跑冲突检查（"分歧点上有没有字面量"本来就是段级概念），并**按出现顺序提取命名捕获**（`Pattern<S>::params()`，供与 handler 的 `Param<...>` 交叉核对）。<br>**运行期**（请求路径匹配）= **字符级压缩**（radix）：边是字符片段，对请求路径做字符串匹配。<br>✅ 已按此**删除**原先的段级运行期匹配器 | 🟡 |
+| **粒度分工** | **🔄 修订（2026-10-12 晚，用户明确）**：**两阶段两种粒度**。<br>**编译期**（校验 + **参数提取**）= **段级**：用 `PatternView` 的段序列跑冲突检查（"分歧点上有没有字面量"本来就是段级概念），并**按出现顺序提取命名捕获**（`Pattern<S>::params()`，供给 `req.param<>()` 算下标）。<br>**运行期**（请求路径匹配）= **字符级压缩**（radix）：边是字符片段，对请求路径做字符串匹配。<br>✅ 已按此**删除**原先的段级运行期匹配器 | 🟡 |
 | 树形 | **每 method 一棵字符级压缩 radix tree**（⚠️ 不是段级 trie） | ✅ |
 | 建树方式 | **`constexpr` 构建器**：把各路由的**段序列**压成**字符级** radix；冲突检查在段级完成。方法论借自 `ctre`（用 `constexpr` 函数而非模板元编程） | ✅ |
 | 边的存储 | label 全部是某个 pattern 的 `raw` 上的**切片**（静态存储）→ **零拷贝**；分叉时只把切片一分为二，不拷贝字符 | ✅ |
@@ -642,11 +645,12 @@ auto server = pylai::Server::builder()
 >   会落到同一节点互相覆盖（`GET /items` 变 405、`POST /items` 变 200）。现在按动词分开建树，`tests/http_e2e.py` 有这两条断言钉住。
 > - **一个 builder 只允许一次 `route_on`**（2026-10-13 晚②）✅ —— 编译期：`route_on` 返回的 `Builder::Configured` 只有 `build()`，
 >   于是"声明两组路由"编不过、跨组冲突不存在；组内冲突由 `validate_group` 在注册点**点名两条 pattern** 拦下。
-> - **协程返回类型**：`Endpoint` 能当协程返回类型靠 `route.cppm` 尾部的 `coroutine_traits` 特化 →
->   `standalone/asio.cppm` 因此导出 `asio::detail::awaitable_frame`。
-> - **端到端已验证** ✅：`tests/http_e2e.py`（裸 socket，避开 curl 的环境变量）发 9 个请求全过 ——
->   `/users/42 → user id=42`（位置注入生效）· `GET /items` 与 `POST /items`（**同路径两动词各走各的**）·
->   `POST /health → 405` · `/nope` 与 `/echo → 404`。复核：`cmake --build --preset debug_llvm` → `./tests/run.sh`。
+> - **协程返回类型**：~~`Endpoint` 能当协程返回类型靠 `route.cppm` 尾部的 `coroutine_traits` 特化~~
+>   🔄 **2026-10-13 晚已删** —— 声明搬到第一个形参后，handler 返回 `awaitable<void>` 是**天然**的，
+>   无需借 asio 的 frame 当返回值 ⇒ `coroutine_traits` 特化与 `release()` 一并删除（手写协程正文也是那个理由不再需要）。
+> - **端到端已验证** ✅：`tests/http_e2e.py`（裸 socket，避开 curl 的环境变量）22 条用例全过 ——
+>   `/users/42 → user id=42`（`req.param<>()` 生效）· `GET /items` 与 `POST /items`（**同路径两动词各走各的**）·
+>   `POST /health → 405` + `Allow` · `/nope` → 404 · 请求体（含 chunked）与 413。复核：`cmake --build --preset debug_llvm` → `./tests/run.sh`。
 > - **已知缺口** 🔍：`/users/abc → user id=0`（`from_chars` 失败静默给 0 → 需要 400 路径）；
 >   `make_handler` 擦除后**没有捕获通道**，只能按本条 pattern **再匹配一次**（正确但冗余）。
 > - **三层级分工**（2026-10-13 讨论结论）：`Pattern` = **单条 route** 的语法扫描（产段）· `PieceCursor` = **变换**（段序列 → 片段序列，
@@ -664,16 +668,16 @@ auto server = pylai::Server::builder()
 >   单留 `node_budget = raw.size() + 1` 给 `k_node_bound`（**值不变** ⇒ **建树行为一字不动**）。
 >   ⚠️ `k_node_bound` **不能**跟着收紧：`end_mark` 与匿名 `catch_all` 的边 label 是**空**的，"`#edges ≤ Σ 字符数`"不成立。
 >   复核：新增 5 条 `static_assert`（钉住维度）+ 原有 96 条 + `./tests/run.sh`（9/9）。
-#### D. 位置注入
+#### D. 路径参数怎么给 handler（🔄 2026-10-13 重写：`Param<>` 整套已废）
 
 | 项 | 决定 | 状态 |
 |---|---|---|
-| 参数写法 | `Param<"id", int>`（名字+类型）/ `Param<"id">`（名字）/ `Param<int>`（位置） | 🟡 |
-| 名字式 vs 位置式 | **禁止混用**（编译期 `static_assert` 拦住） | 🟡 |
-| 失败语义 | `Param` 呈 **`std::expected` 形状**（`has_value()` / `value()` / `error()`），**转换失败由 handler 自检**，框架不自动拦 | 🟡 |
-| 注入范围 | 只要 **`Param<...>` + `const http::Request&`**（body / query / header 留待将来） | 🟡 |
-| handler 返回值 | **`awaitable<Response>` 与同步 `Response` 都支持**（擦除时统一包成协程） | 🟡 |
-| 交叉核对 | 注册点 `static_assert`：pattern 的占位符集合 ↔ handler 的 `Param` 集合（名字 / 个数对不上 → 编译错） | 🟡 |
+| 参数写法 | ✅ **`req.param<T, "名字">()`**（`Request` 的成员函数，名字必写）—— 声明搬到第一个形参后，**请求对象本身就能带捕获**，不再需要在形参表里摆载体。于是 `Param` / `IsParam` / `ParamCount` / `SlotOf` / 位置配对 全部删除 | ✅ |
+| ~~名字式 vs 位置式混用~~ | 不存在了 —— 只有按名字一种，没有"第 N 个"这个概念 | ✅ |
+| 校对时机 | ✅ 挪到**调用点**：`slot_of("名字")` 在编译期算出下标，不在 pattern 里就编不过（错误定位到写的那一行）<br>⚠️ **代价**：“pattern 里的名字没人读”不再算错 —— 读取发生在 handler 体内，编译期看不到 | ✅ |
+| 失败语义 | 🔍 **仍是缺口**：整数转换失败静默给 0（`/users/abc → id == 0`）。备选：`std::expected` 形状的返回值（`has_value()` / `value()` / `error()`），由 handler 自检 | 🟡 |
+| 注入范围 | ✅ 现在只有 `Get<…>` 请求 + `http::Response&` 两种；body / query / header 留待将来（读体见 §4.1） | 🟡 |
+| handler 返回值 | **必须是 `asio::awaitable<void>`**（2026-10-13 修订：曾是 `awaitable<Response>` 或同步 `Response`） | ✅ |
 
 #### E. 与主流实现的对照（本次调研来源）
 
@@ -704,12 +708,13 @@ auto server = pylai::Server::builder()
    - ⚠️ **推翻了我先前的判断**：我曾据 `ctre` 文档断言"UDL 形式必须依赖 N3599"——
      实测表明 **class-type NTTP 的 UDL 形式在 clang 23 上直接可用**（`ctre` 文档可能滞后）。
    - 🔄 **作废（2026-10-13）**：`operator""_route` 已随**旧字符串路由接口**一并从 `server/route.cppm` 删除
-     —— 注册语法改为 `Get<"...">` 放返回类型位置，不再需要这个 UDL。上面的实测结论仍可复验，但**不再是活跃设计**。
+     —— 声明语法改为 `Get<">...">` 住在**第一个形参**，不再需要这个 UDL。上面的实测结论仍可复验，但**不再是活跃设计**。
 2. **"错误无法通过编译"依赖两个前提**：① Builder 必须是**类型级**累积（否则 `build()` 只能在运行期跑）；
    ② pattern 必须**全部来自字面量**（用户已确认活跃集合只做切换）。任一前提变化，编译期错误检测就退化为运行期。
 3. **编译时间 / 模板深度**：类型级 Builder + `constexpr` 建树 + 协程 + 模块，四者叠加。
    路由少时看不出来，路由多时需实测。
-4. **位置注入要求 handler 签名可内省** → **泛型 lambda（`auto` 参数）不支持**，需 `static_assert` 给出清晰报错。
+4. **声明式路由要求 handler 签名可内省** → **泛型 lambda（`auto` 参数）不支持**，需 `static_assert` 给出清晰报错
+   （现只剩两个约束：第一个形参是请求类型、返回类型是 `awaitable<void>`）。
 5. **静态优先 + 冲突报错会拒掉一些"看起来合理"的组合**（如 `/a/{x}` 与 `/a/{y}` 直接编译错）。
 6. **`{rest...}` / `{$}` / 尾斜杠子树 三者语义接近**，容易误用；实现时需给对照例子。
 
