@@ -108,6 +108,18 @@
 
 **为什么这层先做**：它是"请求"这个概念的诞生地；下游所有层（观测单位、参数模型）都以它产出的东西为基准。
 
+#### 3.1 请求体（✅ 2026-10-13 落地）
+
+| 项 | 决定 | 状态 |
+|---|---|---|
+| 收集 | llhttp `on_body` 追加到 `Request::body`（`std::string`）；**chunked 的块边界由 llhttp 剥掉**，回调拿到的就是载荷 | ✅ |
+| 上限 | `Settings::max_body_bytes`（默认 1 MiB，`Builder::max_body_bytes()` 可改）。超限时 `on_body` 返回 `HPE_USER` **就地中止解析** → `ParseStatus::too_large` → **413 + 关连接** | ✅ |
+| 为何必须有上限 | llhttp 边收边喂回调，`Request::body` 会跟着客户端一直涨 —— Stage 0 明确要"有界资源"，没上限就是内存 DoS | ✅ |
+| `Expect: 100-continue` | **未做 🔍** —— 不发 `100 Continue`，客户端会先等超时再发体（能用，但多一次往返） | 🔍 |
+
+> 定界由 llhttp 负责（`Content-Length` / chunked / EOF），`consumed` 一直覆盖到**整条消息含体**，
+> 所以带体请求与 pipeline 共存不需要额外处理（`tests/http_e2e.py` 有这条断言）。
+
 ---
 
 ## 4. L1 连接与流层：请求住在哪里
@@ -337,7 +349,7 @@ $\sigma$ = 争用项，$\kappa$ = 一致性项（**拐点后吞吐反而下降**
 
 | 阶段 | 内容 | 验证 |
 |---|---|---|
-| **0** | HTTP/1.1 基线：单 io_context + io_uring，固定线程数，keep-alive，**有界队列 + 在途上限 + 超时**（哪怕固定值）。**无指标、无自适应、无 TLS**。<br>🟡 **进行中**<br>✅ 已跑通：llhttp 解析（pipeline / 半包 / 400 / 431）、keep-alive、空闲与写超时、**取消传播**（每连接独立 `cancellation_signal` + `plf::hive` 注册表，见 `asio-notes.md` §7）、SIGINT 优雅停机、io_uring 后端（实测 `anon_inode:[io_uring]`）、**声明式路由**（`route_on` + 编译期冲突检查 + 每 method 一棵树，见 §11.2 C）、**协议层应答**（405/OPTIONS 的 `Allow`、HEAD 复用 GET，见 §11.2 G）<br>❌ 尚差：**有界队列 / 准入控制**、**外部压测 60s 基线**、**请求体**（`Request` 还没有 `body`，llhttp 也没接 `on_body`） | 外部压测 60s 无泄漏无挂死，记录基线 |
+| **0** | HTTP/1.1 基线：单 io_context + io_uring，固定线程数，keep-alive，**有界队列 + 在途上限 + 超时**（哪怕固定值）。**无指标、无自适应、无 TLS**。<br>🟡 **进行中**<br>✅ 已跑通：llhttp 解析（pipeline / 半包 / 400 / 431）、keep-alive、空闲与写超时、**取消传播**（每连接独立 `cancellation_signal` + `plf::hive` 注册表，见 `asio-notes.md` §7）、SIGINT 优雅停机、io_uring 后端（实测 `anon_inode:[io_uring]`）、**声明式路由**（`route_on` + 编译期冲突检查 + 每 method 一棵树，见 §11.2 C）、**协议层应答**（405/OPTIONS 的 `Allow`、HEAD 复用 GET，见 §11.2 G）、**请求体**（llhttp `on_body` + 上限 → 413，见 §3.1）<br>❌ 尚差：**有界队列 / 准入控制**、**外部压测 60s 基线** | 外部压测 60s 无泄漏无挂死，记录基线 |
 | **1** | **只测不调**：按 §4 的结论建在 "stream/请求" 层的指标；请求级直方图 + 计数器 + OS 侧；周期报告；**观测开销自测**；冻结模式 | 指标稳定；开销 < 1~2% |
 | **2** | 动态池：§5.4 上下界 + EWMA/死区/迟滞/冷却 + 护栏/限步/回滚/冻结。引入 TLS 作为可控 CPU 密集负载 | 阶跃负载收敛性；固定 N（含 2N）vs 动态；**CPU 密集 vs 阻塞型各跑一遍** |
 | **3** | **离线扫参 + 跨窗口累积**（利用允许停机维护）：维护窗口内重启扫参 → 归档 / 固化；指纹 + 版本化；冻结 / 重置 / 打印 | 第二次启动"进入良好区间所需时间"缩短；模型跨窗口改进（见 §7.2） |

@@ -59,6 +59,12 @@ Server::Builder& Server::Builder::max_requests_per_connection(std::size_t count)
 	return *this;
 }
 
+Server::Builder& Server::Builder::max_body_bytes(std::size_t bytes)
+{
+	settings.max_body_bytes = bytes;
+	return *this;
+}
+
 Server Server::Builder::build() { return Server(std::move(settings), std::move(routes)); }
 
 Server Server::Builder::Configured::build() { return Server(std::move(settings_), std::move(routes_)); }

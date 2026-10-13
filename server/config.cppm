@@ -20,6 +20,9 @@ struct Settings
 	std::chrono::seconds write_timeout{30};
 
 	std::size_t max_requests_per_connection{1000};
+
+	// 请求体上限：超过即中止解析 → 413 + 关连接。Stage 0 取保守固定值，防无界内存。
+	std::size_t max_body_bytes{1024 * 1024};
 };
 
 } // namespace pylai

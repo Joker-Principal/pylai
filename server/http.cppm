@@ -28,6 +28,9 @@ struct Request
 
 	std::vector<Header> headers;
 
+	// 请求体。chunked 已由 llhttp 解码；无体（GET/HEAD 等）就是空串。
+	std::string body;
+
 	std::uint64_t content_length{0};
 	bool has_content_length{false};
 	bool has_query{false};
@@ -52,14 +55,16 @@ std::string serialize(const Response& response, bool keep_alive, bool head_only)
 enum class ParseStatus
 {
 	incomplete, // 需要更多字节
-	complete,	// 已解析出一个完整请求（consumed = 本请求占用的字节数）
-	error,		// 协议错误
+	complete, // 已解析出一个完整请求（consumed = 本请求占用的字节数）
+	too_large, // 请求体超过上限，解析已就地中止
+	error, // 协议错误
 };
 
 class Parser
 {
 public:
-	Parser();
+	// max_body_bytes：请求体上限；超过时 execute() 返回 too_large（解析就地中止）。
+	explicit Parser(std::size_t max_body_bytes);
 	~Parser();
 
 	Parser(Parser&&) noexcept;

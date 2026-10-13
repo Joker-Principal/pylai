@@ -24,6 +24,9 @@ struct App
 	// HEAD 的钉子：`/both` 同时有 GET 与显式 `Head<>`（显式优先）；`/health` 只有 GET → HEAD 复用 GET。
 	Get<"/both"> both(const pylai::http::Request& request);
 	Head<"/both"> both_head(const pylai::http::Request& request);
+
+	// 请求体：llhttp 的 on_body 把体（chunked 已解码）填进 request.body，handler 直接读。
+	Post<"/body"> echo_body(const pylai::http::Request& request);
 };
 
 Get<"/health"> App::health(const pylai::http::Request&)
@@ -75,6 +78,13 @@ Head<"/both"> App::both_head(const pylai::http::Request&)
 	co_return response;
 }
 
+Post<"/body"> App::echo_body(const pylai::http::Request& request)
+{
+	pylai::http::Response response;
+	response.body = "body=" + request.body;
+	co_return response;
+}
+
 } // namespace
 
 int main()
@@ -84,8 +94,9 @@ int main()
 		App app; // 必须比 server 活得久：路由里存的是 &app
 		auto server = pylai::Server::builder()
 		                  .bind("127.0.0.1", 18080)
-		                  .route_on(&app, &App::health, &App::user, &App::submit, &App::list_items,
-			                            &App::create_item, &App::both, &App::both_head)
+			                  .max_body_bytes(1024) // 让 e2e 用 1 KiB 就能试到 413
+			                  .route_on(&app, &App::health, &App::user, &App::submit, &App::list_items,
+			                            &App::create_item, &App::both, &App::both_head, &App::echo_body)
 		                  .build();
 		return server.run();
 	}

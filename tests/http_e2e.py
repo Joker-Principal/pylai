@@ -10,13 +10,21 @@ import sys
 HOST, PORT = "127.0.0.1", 18080
 
 
-def request(method, target, body=b""):
+def request(method, target, body=b"", chunked=False):
     head = f"{method} {target} HTTP/1.1\r\nHost: {HOST}:{PORT}\r\nConnection: close\r\n"
-    if body:
+    payload = b""
+    if chunked:
+        # 每 3 字节一块：既试 chunked，也试"块边界与读边界不一致"
+        head += "Transfer-Encoding: chunked\r\n"
+        pieces = [body[i : i + 3] for i in range(0, len(body), 3)]
+        payload = b"".join(b"%x\r\n%s\r\n" % (len(p), p) for p in pieces) + b"0\r\n\r\n"
+    elif body:
         head += f"Content-Length: {len(body)}\r\n"
+        payload = body
     head += "\r\n"
+
     sock = socket.create_connection((HOST, PORT), timeout=5)
-    sock.sendall(head.encode() + body)
+    sock.sendall(head.encode() + payload)
     data = b""
     while True:
         chunk = sock.recv(65536)
@@ -33,7 +41,7 @@ def split_body(raw):
     return body if sep else ""
 
 
-# (method, target, 请求体, 期望状态码, 期望出现在响应里, 期望正文为空)
+# (method, target, 请求体, 期望状态码, 期望出现在响应里, 期望正文为空[, chunked=True])
 # 断言都带 \r\n 收尾，免得 "Allow: GET, HEAD" 命中 "Allow: GET, HEAD, POST"。
 CASES = [
     ("GET", "/health", b"", 200, "ok", False),
@@ -59,29 +67,58 @@ CASES = [
     ("OPTIONS", "/items", b"", 204, "Allow: GET, HEAD, POST\r\n", True),
     ("OPTIONS", "/both", b"", 204, "Allow: GET, HEAD\r\n", True),      # 有显式 HEAD → 不重复补
     ("OPTIONS", "/nope", b"", 404, "404", False),                       # 路径不在 → 404（不是 HEAD，正文照发）
+
+    # 请求体：llhttp 的 on_body（chunked 已解码）→ request.body
+    ("POST", "/body", b"hello", 200, "body=hello", False),
+    ("POST", "/body", b"", 200, "body=", False),                                  # 空体
+    ("POST", "/body", b"chunked-payload", 200, "body=chunked-payload", False, True),  # Transfer-Encoding: chunked
+    ("POST", "/body", b"x" * 1025, 413, "413", False),                        # 测试程序把上限设为 1024 → 413
 ]
 
-failed = 0
-for method, target, body, want_status, want_text, want_empty_body in CASES:
+def check(method, target, body, want_status, want_text, want_empty_body, chunked=False):
+    """发一个请求并断言；返回是否通过（同时打印一行）。"""
     try:
-        raw = request(method, target, body)
+        raw = request(method, target, body, chunked)
     except OSError as exc:
         print(f"  ✗ {method} {target}: 连接失败 {exc}")
-        failed += 1
-        continue
+        return False
 
     status_line = raw.split("\r\n", 1)[0]
     ok_status = f" {want_status} " in status_line
     ok_text = want_text in raw
     ok_body = (split_body(raw) == "") if want_empty_body else True
-    mark = "✓" if (ok_status and ok_text and ok_body) else "✗"
-    if mark == "✗":
-        failed += 1
+    ok = ok_status and ok_text and ok_body
     extra = "" if ok_body else "  ← 正文非空"
     print(
-        f"  {mark} {method:7} {target:14} -> {status_line!r} "
+        f"  {'✓' if ok else '✗'} {method:7} {target:14} -> {status_line!r} "
         f"(期望 {want_status}, 含 {want_text!r}){extra}"
     )
+    return ok
+
+
+def check_pipeline():
+    """同一连接上连发两个请求（第一个带体）：体的字节不能被算进下一个请求。"""
+    sock = socket.create_connection((HOST, PORT), timeout=5)
+    sock.sendall(
+        b"POST /body HTTP/1.1\r\nHost: h\r\nContent-Length: 3\r\n\r\nabc"
+        b"GET /health HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n"
+    )
+    raw = b""
+    while True:
+        chunk = sock.recv(65536)
+        if not chunk:
+            break
+        raw += chunk
+    sock.close()
+
+    text = raw.decode(errors="replace")
+    got = text.count("HTTP/1.1 200")
+    ok = got == 2 and "body=abc" in text and "ok" in text
+    print(f"  {'✓' if ok else '✗'} {'pipeline':7} {'(两个请求)':14} -> 收到 {got} 个 200（期望 2）")
+    return ok
+
+
+failed = [check(*case) for case in CASES].count(False) + (0 if check_pipeline() else 1)
 
 print(("FAILED: %d" % failed) if failed else "ALL PASS")
 sys.exit(1 if failed else 0)

@@ -38,13 +38,6 @@ http::Response error_response(int status)
 
 } // namespace
 
-Session::Session(const Settings& settings, const route::Router& routes, asio::ip::tcp::socket socket, std::string remote) :
-	settings(settings),
-	routes(routes),
-	socket(std::move(socket)),
-	remote(std::move(remote))
-{}
-
 asio::awaitable<void> Session::handle(const Settings& settings, const route::Router& routes, asio::ip::tcp::socket socket)
 {
 	std::error_code ec;
@@ -83,6 +76,14 @@ asio::awaitable<void> Session::handle(const Settings& settings, const route::Rou
 	log::info("[{}] disconnected", session.remote);
 }
 
+Session::Session(const Settings& settings, const route::Router& routes, asio::ip::tcp::socket socket, std::string remote) :
+	settings(settings),
+	routes(routes),
+	socket(std::move(socket)),
+	remote(std::move(remote)),
+	parser(settings.max_body_bytes)
+{}
+
 asio::awaitable<void> Session::run()
 {
 	for(std::size_t served = 0;; ++served)
@@ -108,18 +109,22 @@ asio::awaitable<bool> Session::read_request()
 			std::size_t consumed = 0;
 			const auto status = parser.execute(buffer.data(), buffered, consumed);
 
-			if(status == http::ParseStatus::complete)
+			switch(status)
 			{
+			case http::ParseStatus::complete:
 				consume(consumed);
 				parser.resume();
 				co_return true;
-			}
-
-			if(status == http::ParseStatus::error)
-			{
+			case http::ParseStatus::too_large:
+				log::warn("[{}] request body over {} bytes", remote, settings.max_body_bytes);
+				co_await write(http::serialize(error_response(413), false, false));
+				co_return false;
+			case http::ParseStatus::error:
 				log::warn("[{}] bad request: {}", remote, parser.error_reason());
 				co_await write(http::serialize(error_response(400), false, false));
 				co_return false;
+			default:
+				break;
 			}
 		}
 

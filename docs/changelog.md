@@ -5,6 +5,10 @@
 
 ## 2026-10-13
 
+- **请求体：接上 llhttp 的 `on_body`** ✅ —— `Request::body`（chunked 已由 llhttp 解码）；
+  `Settings::max_body_bytes`（默认 1 MiB）+ `Builder::max_body_bytes()`：超限时 `on_body` 返回 `HPE_USER` **就地中止解析** → `ParseStatus::too_large` → **413 + 关连接**。设计见 `http-server-plan.md` §3.1。
+  复核：`./tests/run.sh`（22 项全过，含 chunked 分块、空体、1025 > 1024 的 413、以及带体请求与下一请求的 pipeline）。
+
 - **协议层应答：405 / OPTIONS 带 `Allow`，HEAD 复用 GET** ✅ —— 见 `http-server-plan.md` §11.2 G。
   `dispatch`（`server/route.cpp`）里“逐棵动词树试一遍”的结果现在被留下来算 `Allow`；HEAD 没有显式 `Head<>` 时落到同路径的 GET。
   正文抑制收口在 `http::serialize(response, keep_alive, head_only)`（`session.cpp` 传 `req.method == "HEAD"`）→ 显式 `Head<>` 也不会漏发体。

@@ -45,6 +45,7 @@ struct Parser::Impl
 {
 	llhttp_t handle{};
 	Request request;
+	std::size_t max_body_bytes{0};
 	std::string pending_field;
 	std::string pending_value;
 	std::string reason;
@@ -96,6 +97,16 @@ struct Parser::Impl
 		return 0;
 	}
 
+	// chunked 的块边界由 llhttp 剥掉，这里拿到的是**载荷**。
+	static int on_body(llhttp_t* parser, const char* at, std::size_t length)
+	{
+		auto* owner = self(parser);
+		if(owner->request.body.size() + length > owner->max_body_bytes) return HPE_USER; // 中止解析，交给 Session 回 413
+
+		owner->request.body.append(at, length);
+		return 0;
+	}
+
 	static int on_message_complete(llhttp_t* parser)
 	{
 		auto* owner = self(parser);
@@ -130,6 +141,7 @@ struct Parser::Impl
 			s.on_header_value = &on_header_value;
 			s.on_header_value_complete = &on_header_value_complete;
 			s.on_headers_complete = &on_headers_complete;
+			s.on_body = &on_body;
 			s.on_message_complete = &on_message_complete;
 			return s;
 		}();
@@ -137,8 +149,9 @@ struct Parser::Impl
 	}
 };
 
-Parser::Parser() : impl(std::make_unique<Impl>())
+Parser::Parser(std::size_t max_body_bytes) : impl(std::make_unique<Impl>())
 {
+	impl->max_body_bytes = max_body_bytes;
 	llhttp_init(&impl->handle, HTTP_REQUEST, &Impl::settings());
 	impl->handle.data = impl.get();
 }
@@ -160,6 +173,12 @@ ParseStatus Parser::execute(const char* data, std::size_t length, std::size_t& c
 		const char* position = llhttp_get_error_pos(&impl->handle);
 		consumed = position != nullptr ? static_cast<std::size_t>(position - data) : length;
 		return ParseStatus::complete;
+	}
+
+	if(err == HPE_USER) // 本文件里只有 on_body 会主动报错（体超上限）
+	{
+		impl->reason = "request body exceeds the configured limit";
+		return ParseStatus::too_large;
 	}
 
 	impl->reason = llhttp_get_error_reason(&impl->handle);

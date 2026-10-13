@@ -48,6 +48,7 @@ public:
 		Builder& idle_timeout(std::chrono::seconds timeout);
 		Builder& write_timeout(std::chrono::seconds timeout);
 		Builder& max_requests_per_connection(std::size_t count);
+		Builder& max_body_bytes(std::size_t bytes);
 
 		// 声明式注册：`builder.bind(...).route_on(&app, &App::health, &App::submit).build()`。
 		// 动词 / 路径 / 形参表全从成员指针取（返回类型是 route::Endpoint<...>，形参里的 Param<> 按位置吃捕获）。
