@@ -1,8 +1,11 @@
-# server/ —— 应用层：HTTP 服务器实现（可执行 `pylai`）
+# server/ —— HTTP 服务器框架（静态库 `pylai`）
 
 ## 这个目录的职责
 
-**唯一职责：实现 HTTP 服务器**，产出可执行 target **`pylai`**。
+**唯一职责：提供 HTTP server 框架**，产出**静态库** target **`pylai`**。
+
+**这里没有 `main`、没有任何业务路由** —— 框架不替使用者决定有哪些路由。
+只用框架起服务器的示例应用（`App`）+ 端到端验证在 **`tests/`**。
 
 - **名字来源**：**πύλαι（pylai）**，"门 / 关口"（如 Thermopylae 温泉关，字面即"热之门"）。
   命名顺着上游 Herodotus → Clio 的古典脉络：HTTP server 正是系统的**唯一门户**。
@@ -13,31 +16,30 @@
   **`llhttp`** 解析（hical 用 `picohttpparser`）。
 - **设计路线**见 `docs/http-server-plan.md`（L0 协议 → L1 连接/流 → L2 执行与并发 → L3 观测 → L4 参数）。
 
-## 当前状态（🟡 Stage 0 骨架，未完成）
+## 当前状态（🟡 Stage 0，未完成）
 
-**只是 TCP 字节回显** —— 唯一目的：把「asio 模块 + io_uring + 固定线程数 `run()`」这条链路跑通。
+已有：llhttp 解析（pipeline / 半包 / 400 / 431）、keep-alive、空闲与写超时、
+每连接独立 `cancellation_signal`、SIGINT/SIGTERM 优雅停机、io_uring 后端、
+**声明式路由**（DSL 见 `docs/routing.md`）。
 
 刻意**尚无**（按计划分层顺序逐步加）：
 
 | 缺什么 | 计划位置 |
 |---|---|
-| HTTP 解析（`llhttp`） | L0，下一步 |
-| 有界队列 / 在途上限 / 超时 | Stage 0 的验收项（§9） |
+| 有界队列 / 在途上限 / 准入控制 | Stage 0 的验收项（§9） |
 | 指标 · 自适应 · TLS | L3 / L4 / Stage 2 |
 
-## 构建与运行
+## 构建
 
 ```
-cmake --preset dev_llvm                # 仅当依赖 / 目录结构变化时需要
-cmake --build --preset debug_llvm
-./build-dev_llvm/server/Debug/pylai    # 监听 127.0.0.1:18080
-                                       # 注：子目录 target 的产物带一层目录名
+cmake --preset dev_llvm              # 仅当依赖 / 目录结构变化时需要
+cmake --build --preset debug_llvm    # 产出 server/Debug/libpylai.a
 ```
 
-冒烟（发一个 HTTP 请求，响应体是解析结果摘要）：
+把框架跑起来（示例应用 + 端到端断言）→ 见 `tests/README.md`：
 
-```bash
-python3 -c "import socket;s=socket.create_connection(('127.0.0.1',18080));s.sendall(b'GET /hello HTTP/1.1\r\nHost: a\r\n\r\n');print(s.recv(400).decode())"
+```
+./tests/run.sh
 ```
 
 ## 用 clice 查路由设施
@@ -64,11 +66,11 @@ tools/clice query --method definition      --name 'parse_into'
 
 | 配置 | 用途 |
 |---|---|
-| `Debug pylai` | Debug 构建，日常调试 |
-| `Debug pylai (ASan)` | AddressSanitizer 构建，查 use-after-free / 越界 |
-| `Attach to pylai` | 附加到已在运行的实例 |
+| `Debug app` | Debug 构建，日常调试（产物 `build-dev_llvm/tests/Debug/app`） |
+| `Debug app (ASan)` | AddressSanitizer 构建，查 use-after-free / 越界 |
+| `Attach to app` | 附加到已在运行的实例 |
 
-⚠️ pylai 是**服务器**：按 F5 起来后必须**另开一个终端发请求**（比如上面那条冒烟命令），才会命中断点。
+⚠️ 它是个**服务器**：按 F5 起来后必须**另开一个终端发请求**（`python3 tests/http_e2e.py`），才会命中断点。
 
 排查 cancellation 的 UAF：见 `docs/asio-notes.md` §7；建议先在这些位置下断点 ——
 `asio/impl/cancellation_signal.ipp:44`（`cancellation_slot::clear()`）与

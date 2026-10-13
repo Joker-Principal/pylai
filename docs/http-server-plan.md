@@ -349,9 +349,9 @@ $\sigma$ = 争用项，$\kappa$ = 一致性项（**拐点后吞吐反而下降**
 ## 10. 尚未决定（❓）
 
 1. **应用层目录名**：✅ **已定：`server/`（2026-10-12）**。用户说"建一个新文件夹，现在 `main.cpp` 的内容抛弃"；候选曾为 `app/` / `server/` / 其他。
-2. **入口归属**：✅ **已定：入口移到 `server/`，根 `main.cpp` 删除（2026-10-12）**；
-   可执行 target 名 **`pylai`**（πύλαι，"门"；见 §1.4）。产物路径随之变为
-   `build-dev_llvm/server/Debug/pylai`。
+2. **入口归属**：✅ **已定（2026-10-12，🔄 2026-10-13 修订）**：根 `main.cpp` 删除，入口归**应用层**。
+   当时放在 `server/` 并让 `pylai` 是可执行文件；**现修订**为：`server/` 只出**静态库 `pylai`**（框架，无 `main`），
+   示例应用 + 入口在 `tests/`，可执行 target 名 **`app`**（πύλαι 这个命名留给框架库）。
 3. **HTTP 解析库选型**：✅ **已定：`llhttp`（2026-10-12，可推翻）**；`picohttpparser` 为后路（§3）。
 4. **HTTP/2、HTTP/3 的技术栈**（§3）。
 5. **内存方案**：mimalloc + pmr 的接入方式与分配器边界（§8）。
@@ -492,10 +492,10 @@ auto server = pylai::Server::builder()
 >   `dispatch` 不再有"精确表"那两步。
 > - **协程返回类型**：`Endpoint` 能当协程返回类型靠 `route.cppm` 尾部的 `coroutine_traits` 特化 →
 >   `standalone/asio.cppm` 因此导出 `asio::detail::awaitable_frame`。
-> - **端到端已验证** ✅：`.vscode/tmp/route-dsl-probe/http_e2e.py`（裸 socket，避开 curl 的环境变量）
->   对 `build-dev_llvm/server/Debug/pylai` 发 7 个请求全过 —— `/users/42 → user id=42`（位置注入生效）·
->   `POST /submit/7`（同组另一动词）· `POST /health → 405` · `/nope` 与 `/echo → 404`。
->   复核：`cmake --build --preset debug_llvm` → 起 `build-dev_llvm/server/Debug/pylai` → `python3 .vscode/tmp/route-dsl-probe/http_e2e.py`。
+> - **端到端已验证** ✅：`tests/http_e2e.py`（裸 socket，避开 curl 的环境变量）发 7 个请求全过 ——
+>   `/users/42 → user id=42`（位置注入生效）· `POST /submit/7`（同组另一动词）· `POST /health → 405` ·
+>   `/nope` 与 `/echo → 404`。复核：`cmake --build --preset debug_llvm` → `./tests/run.sh`
+>   （2026-10-13 起：示例应用与脚本已从 `.vscode/tmp/route-dsl-probe/` 搬进 `tests/`）。
 > - **已知缺口** 🔍：`/users/abc → user id=0`（`from_chars` 失败静默给 0 → 需要 400 路径）；
 >   `make_handler` 擦除后**没有捕获通道**，只能按本条 pattern **再匹配一次**（正确但冗余）。
 
