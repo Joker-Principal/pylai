@@ -1,0 +1,210 @@
+# 路由手册
+
+> 写 handler、要指定路由时查这份。
+>
+> - **怎么声明路由** → §1：`Get<"…">` 写在**返回类型**位置，形参用 `Param<>`，交给 `Builder::route_on` 注册。
+> - **pattern 的语法与匹配语义** → §2–§6：`Get<>` 尖括号里写的、`Pattern<>` 里写的，是**同一套** pattern。
+> - 所有规则在**编译期**生效：pattern 写错、路由之间冲突，都**编不过**。
+
+---
+
+## 1. 怎么声明路由
+
+动词与路径写在**返回类型**位置，handler 形参里的 `Param<>` 按**位置**吃命名捕获，整包一次注册：
+
+```cpp
+using namespace pylai::route;
+
+struct App
+{
+	Get<"/health"> health(const pylai::http::Request& request);
+	Get<"/users/{id}"> user(Param<int, "id"> id, const pylai::http::Request& request);
+	Post<"/submit/{id}"> submit(Param<int, "id"> id, const pylai::http::Request& request);
+};
+
+Get<"/users/{id}"> App::user(Param<int, "id"> id, const pylai::http::Request&)
+{
+	pylai::http::Response response;
+	response.body = "user id=" + std::to_string(id.value) + "\n";
+	co_return response;
+}
+
+App app;   // 必须比 server 活得久：路由里存的是 &app
+auto server = pylai::Server::builder()
+    .bind("127.0.0.1", 18080)
+    .route_on(&app, &App::health, &App::user, &App::submit)
+    .build();
+```
+
+| 元素 | 说明 |
+|---|---|
+| `Get<>` `Post<>` `Put<>` `Delete<>` `Head<>` `Options<>` `Patch<>` | 动词；尖括号里是 path pattern |
+| `Param<T>` / `Param<T, "name">` | 第 N 个 `Param<>` 吃 pattern 第 N 个**命名捕获**；写了名字就与对应位置的捕获名做编译期校对 |
+| 其它形参（如 `const http::Request&`） | 拿整个请求 |
+| `Builder::route_on(&app, &App::m...)` | 一次注册整包（**一棵**编译期定容的树 + 槽位表） |
+
+**编译期会拦住**：pattern 语法不合法 · `Param<>` 个数 ≠ 命名捕获个数 · `Param<>` 名字与对应位置捕获名不一致。
+
+> ⚠️ **已知缺口**：`Param<int>` 目前用 `std::from_chars` 转换，**失败时静默取 0**（`/users/abc` → `id == 0`）。
+> 要回 400 得由 handler 自己判；该语义尚未定案（见 `http-server-plan.md` §11.2 D）。
+
+### 1.1 底层构件：`Pattern<>` 与 `Table<…>`
+
+`Pattern<S>` 单独解析 / 校验一条 pattern；`Table<On<"METHOD", "…">…>` 把若干条凑在一起做**冲突检查**，冲突就编不过。
+
+```cpp
+using namespace pylai::route;
+
+inline constexpr auto users = Pattern<"/users/{id}/posts/{pid}">{};
+
+inline constexpr Table<
+	On<"GET", "/health">,
+	On<"GET", "/users/{id}">,
+	On<"POST", "/users">> api;
+```
+
+> 📌 这两个**不参与注册** —— 能让路径真正生效的入口只有 `Builder::route_on`。
+> `Router` 里存的是 `route_on` 装出来的路由组（见 `http-server-plan.md` §11.2 C）。
+
+---
+
+## 2. pattern 语法
+
+| 写法 | 含义 | 约束 |
+|---|---|---|
+| `/` **开头** | 必须 | 否则 `must_start_with_slash` |
+| 字面量段 | 逐字符精确匹配 | 段内不能含 `{` 或 `}` |
+| `{name}` | **单段参数** | 名字非空、不含 `{` `}` `/`；**匹配非空段** |
+| `{name...}` | **全捕获** | 必须是**最后一段**（否则 `catch_all_not_last`）；名字规则同上 |
+| `{$}` | **精确尾** —— "恰好到此为止" | 无名字 |
+| **尾斜杠** `/a/` | **匿名全捕获**（子树语义），等价于 `/a/{无名...}` | 见 §3 |
+| `/`（只有根斜杠） | 匿名全捕获（**匹配一切**，但不匹配空路径） | |
+| `//` | 空段 | 除非在末尾 → `empty_segment` |
+| 同一路由内重名 | 禁止 | `duplicate_param` |
+
+段与段之间恒为一个 `/`；`/` 是**段分隔符**，不属于任何段。
+
+### 2.1 花括号的两个说明
+
+| 写法 | 含义 |
+|---|---|
+| 段内的 `{` `}` | **一律按通配符语法解释**，无法作为字面量字符出现 |
+| `{...}` | 等价于名字为 `...` 的**普通参数**（名字只禁止 `{` `}` `/`，所以 `...` 合法） |
+
+### 2.2 编译期错误码（`ParseError`）
+
+| 值 | 触发例 |
+|---|---|
+| `must_start_with_slash` | `users/{id}` |
+| `empty_segment` | `/a//b` |
+| `orphan_brace` | `/a/b{c}` |
+| `empty_param_name` | `/a/{}` |
+| `bad_param_name` | `/a/{{b}}`（名字含 `{`） |
+| `catch_all_not_last` | `/a/{x...}/b` |
+| `duplicate_param` | `/a/{x}/{x}` |
+
+`Pattern<S>::ok()` 为假时 `count` / `kind` / `text` / `params()` 的内容**无意义**（解析中途就返回了）。
+
+---
+
+## 3. 匹配语义
+
+**命中条件**：走到一个"挂了槽位"的节点，**并且路径已经被恰好走完**（不是前缀命中）。
+换句话说，路由是**精确**的 —— 想让 `/files/` 吃下整个子树，必须显式写 `{name...}` 或尾斜杠。
+
+路径一律以 `/` 开头（HTTP 如此）；**空路径不匹配任何 pattern**。
+
+四条边的规则：
+
+| 边 | 吃多少 | 细节 |
+|---|---|---|
+| `chars` | 一个字符片段（可能横跨多个段，含中间的 `/`） | 逐字符比较，**大小写敏感** |
+| `param` | `/` + **非空**段 | 段到下一个 `/` 或串尾；**空段不算**（`/users/` 不匹配 `/users/{id}`） |
+| `catch_all` | `/` + 剩余**全部**（可为空串） | **至少要有一个 `/`**，所以 `/files` 不匹配 `/files/{p...}`，而 `/files/` 匹配（`p == ""`） |
+| `end_mark` | `/` + **立刻到尾** | `/a/{$}` 匹配 `/a/`，不匹配 `/a` 也不匹配 `/a/b` |
+
+### 3.1 真值表（全部由 `static_assert` 钉住）
+
+主路由集 = `["/health", "/api/v1/echo", "/api/v1/users/{id}", "/files/{path...}", "/a/{$}", "/api/v1/user", "/files/static"]`
+
+| 路径 | 结果 |
+|---|---|
+| `/health` | ✅ `/health` |
+| `/health/` | ❌ 404 |
+| `/api/v1/echo` | ✅ `/api/v1/echo` |
+| `/api/v1/user` | ✅ `/api/v1/user` |
+| `/api/v1/users/42` | ✅ `/api/v1/users/{id}`，`id="42"` |
+| `/api/v1/users` | ❌ 参数段必须存在 |
+| `/api/v1/users/` | ❌ 空段不算捕获 |
+| `/api/v1/users/42/posts` | ❌ 多了一段，且无匹配的更长路由 |
+| `/files/a/b` | ✅ `/files/{path...}`，`path="a/b"` |
+| `/files/` | ✅ `/files/{path...}`，`path=""` |
+| `/files` | ❌ catch_all 至少要有一段 |
+| `/files/static` | ✅ `/files/static`（**字面量优先于 catch_all**） |
+| `/files/other` | ✅ `/files/{path...}`，`path="other"` |
+| `/files/static/x` | ✅ `/files/{path...}`，`path="static/x"`（**回溯**，见 §4） |
+| `/a/` | ✅ `/a/{$}` |
+| `/a` | ❌ `{$}` 要求那个尾斜杠 |
+| `/nope` | ❌ 404 |
+
+单独验的两条（`/` 与 `{$}` 不能进上面那个集合：`/` 会吞掉所有 404 用例，且 `/` 与 `/{$}` 本身就冲突）：
+
+| 路径 | 集合 | 结果 |
+|---|---|---|
+| `/` · `/a/b` | `["/"]` | ✅ 都命中根全捕获 |
+| `""`（空路径） | `["/"]` | ❌ |
+| `/` | `["/{$}", "/a/{$}"]` | ✅ `/{$}` |
+| `/a/` | 同上 | ✅ `/a/{$}` |
+| `/a` · `/a/b` | 同上 | ❌ |
+
+---
+
+## 4. 优先级与回溯
+
+同一节点上的出边按固定 rank 排序（同 rank 保持**注册顺序**）：
+
+```
+chars(0)  →  param(1)  →  catch_all(2)  →  end_mark(3)
+```
+
+匹配时**按这个顺序依次试，某条边失败就试下一条** —— 也就是**回溯**。最典型的一例：
+
+```
+路由：/files/static   +   /files/{path...}
+路径：/files/static/x
+→ 先试 chars 边 "/static"：吃掉了，但路径还剩 "/x"、节点也没有出口 → 失败
+→ 回溯，改试 catch_all 边 → 命中 {path...}，path="static/x"
+```
+
+所以"静态优先"是**排序上的偏好**，不是"字面量一票否决"。
+
+---
+
+## 5. 冲突规则（编译期报错）
+
+**规则一句话：分歧点上必须有字面量。**
+
+| 情形 | 判定 | 例 |
+|---|---|---|
+| 公共前缀完全同形，**且等长** | ❌ **报错**（落在同一节点，后注册的会覆盖前一个） | `/a/b` + `/a/b`；`/a/{x}` + `/a/{y}`（同形异名）；`/files/` + `/files/{p...}` |
+| 分歧点是**字面量**（至少一侧） | ✅ 放行（字面量 rank 最高，谁赢一眼看得出） | `/a/{x}/c` + `/a/b/{y}` |
+| 分歧点是**两个通配符** | ❌ **报错**（没有字面量可定优先级） | `/a/{x}` + `/a/{y...}`；`/a/{y...}` + `/a/{$}` |
+| 两侧的段**根本对不上** | ✅ 放行（匹配集合不相交） | `/a` + `/b`；`/a/{x}` + `/a/{$}`（param 只吃非空段，`{$}` 只吃空段） |
+
+**method 维度**：冲突只在**同一 method 内**判定。`On<"", …>` 的**空 method = 不限定**，与任何 method 都算重叠。
+
+报错形态是一个 `static_assert`，消息里会点名**是哪两条路由**冲突（clang 还会指出实例化点）。
+
+## 6. 参数提取
+
+`Pattern<S>::params()` 返回 `std::span<const std::string_view>`：**按出现顺序**的命名捕获。
+
+| pattern | `params()` |
+|---|---|
+| `/health` | `{}` |
+| `/users/{id}` | `{"id"}` |
+| `/users/{id}/posts/{pid}` | `{"id", "pid"}` |
+| `/files/{path...}` | `{"path"}` |
+| `/` · `/a/` · `/a/{$}` | `{}` —— **匿名占位符不计入** |
+
+这份顺序就是**捕获顺序**：匹配时第 i 个命名占位符写进 `captures[i]`。
