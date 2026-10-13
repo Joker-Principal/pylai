@@ -15,10 +15,11 @@
 | --- | --- |
 | `standalone/` | asio → C++20 module 封装（target `asio-module`） |
 | `ports/` | vcpkg overlay ports |
+| `server/` | HTTP 服务器**框架**（静态库 `pylai`），不含业务路由 |
+| `tests/` | 示例应用 + 端到端验证（可执行 `app`） |
 | `docs/` | 笔记与设计草稿 |
 | `tools/` | 仓库内小工具（clice 启动器等） |
 | `boost/` | boost.asio 的 module 封装（未参与构建） |
-| `app/`（❓ 名称待定，尚未创建） | 应用层：HTTP 服务器等 |
 
 **工作区之外的目录**（vcpkg 根、构建产物、扩展目录等）→ `docs/vcpkg.md` 及 `docs/` 下同类文档。
 

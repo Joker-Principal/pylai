@@ -11,7 +11,8 @@
 | `docs/` | 调研笔记与设计草稿（**是笔记，不是决策**） | `docs/README.md` |
 | `tools/` | 仓库内小工具（clice 启动器） | `tools/README.md` |
 | `boost/` | boost.asio 的 module 封装草稿（**当前未参与构建**） | `boost/README.md` |
-| `server/` | **应用层**：HTTP 服务器（可执行 `pylai`）、动态线程池、观测与自学习 | `server/README.md` |
+| `server/` | **HTTP 服务器框架**（静态库 `pylai`），**不含**业务路由 | `server/README.md` |
+| `tests/` | 示例应用 + 端到端验证（可执行 `app`） | `tests/README.md` |
 
 工作区**之外**但要经常查的目录（vcpkg 根等）→ `docs/vcpkg.md`。
 

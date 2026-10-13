@@ -44,3 +44,4 @@ pkg_check_modules(liburing REQUIRED IMPORTED_TARGET liburing)
 
 add_subdirectory(standalone)
 add_subdirectory(server)
+add_subdirectory(tests)
