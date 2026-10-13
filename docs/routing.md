@@ -3,6 +3,10 @@
 > 写 handler、要指定路由时查这份。
 >
 > - **怎么声明路由** → §1：`Get<"…">` 写在**返回类型**位置，形参用 `Param<>`，交给 `Builder::route_on` 注册。
+>
+> ⚠️ **2026-10-13：声明位置已定要改** —— 方向是 `asio::awaitable<void> handle(Get<"/health"> req, FileResponse& res)`：
+> 动词 + pattern 搬到**第一个形参**、响应类型多种、响应由框架发。**本文写的都还是当前实现的写法**，落地后 §1 要重写。
+> 设计见 `http-server-plan.md` §4.1 / §4.1.1。
 > - **pattern 的语法与匹配语义** → §2–§6：`Get<>` 尖括号里写的、`Pattern<>` 里写的，是**同一套** pattern。
 > - 所有规则在**编译期**生效：pattern 写错、路由之间冲突，都**编不过**。
 

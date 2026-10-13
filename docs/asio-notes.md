@@ -323,6 +323,6 @@ pimpl 存在的最大理由已经由模块代劳。
 - **也不用 `atomic_bool` + 双检**：检查通过到 `emplace()` 之间存在窗口，与 `stop()` 的遍历
   仍会并发（hive 的 Insertion vs Iteration = No）—— 这是窗口本身的产物，不是概率问题；
   而且它覆盖不到 `erase()` 之间的并发。
-- ⚠️ **当前是 Stage 0：只有一个 `io_context`**。在做到"每线程一套"之前，
-  `Settings::io_threads` 必须保持 **1**（`Router` 构造函数里有 `assert` 钉住）。
+- ⚠️ **当前只有一个 `io_context`**（还没到“每线程一套”，那是“动态池”那一阶段）。
+  在那之前 `Settings::io_threads` 必须保持 **1**（`Server` 构造函数里有 `assert` 钉住）。
 
