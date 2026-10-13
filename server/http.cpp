@@ -172,7 +172,7 @@ const Request& Parser::current() const { return impl->request; }
 
 std::string_view Parser::error_reason() const { return impl->reason; }
 
-std::string serialize(const Response& response, bool keep_alive)
+std::string serialize(const Response& response, bool keep_alive, bool head_only)
 {
 	std::string out;
 	out.reserve(response.body.size() + 128);
@@ -203,7 +203,7 @@ std::string serialize(const Response& response, bool keep_alive)
 	out += "\r\nConnection: ";
 	out += keep_alive ? "keep-alive" : "close";
 	out += "\r\n\r\n";
-	out += response.body;
+	if(!head_only) out += response.body;
 	return out;
 }
 

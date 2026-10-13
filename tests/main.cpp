@@ -20,6 +20,10 @@ struct App
 	// 同一条路径、两个动词：树按 pattern 建、动词不参与，所以这一组必须靠「每 method 一棵树」才不互相吃。
 	Get<"/items"> list_items(const pylai::http::Request& request);
 	Post<"/items"> create_item(const pylai::http::Request& request);
+
+	// HEAD 的钉子：`/both` 同时有 GET 与显式 `Head<>`（显式优先）；`/health` 只有 GET → HEAD 复用 GET。
+	Get<"/both"> both(const pylai::http::Request& request);
+	Head<"/both"> both_head(const pylai::http::Request& request);
 };
 
 Get<"/health"> App::health(const pylai::http::Request&)
@@ -57,6 +61,20 @@ Post<"/items"> App::create_item(const pylai::http::Request&)
 	co_return response;
 }
 
+Get<"/both"> App::both(const pylai::http::Request&)
+{
+	pylai::http::Response response;
+	response.body = "get\n";
+	co_return response;
+}
+
+Head<"/both"> App::both_head(const pylai::http::Request&)
+{
+	pylai::http::Response response;
+	response.body = "explicit-head\n"; // 长度与 GET 故意不同 → e2e 据此看出是谁应答的
+	co_return response;
+}
+
 } // namespace
 
 int main()
@@ -67,7 +85,7 @@ int main()
 		auto server = pylai::Server::builder()
 		                  .bind("127.0.0.1", 18080)
 		                  .route_on(&app, &App::health, &App::user, &App::submit, &App::list_items,
-		                            &App::create_item)
+			                            &App::create_item, &App::both, &App::both_head)
 		                  .build();
 		return server.run();
 	}

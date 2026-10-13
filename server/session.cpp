@@ -93,7 +93,7 @@ asio::awaitable<void> Session::run()
 		const bool keep_alive = req.keep_alive && (served + 1) < settings.max_requests_per_connection;
 
 		auto response = co_await routes.dispatch(req);
-		if(!co_await write(http::serialize(response, keep_alive))) co_return;
+		if(!co_await write(http::serialize(response, keep_alive, req.method == "HEAD"))) co_return;
 
 		if(!keep_alive) co_return;
 	}
@@ -118,7 +118,7 @@ asio::awaitable<bool> Session::read_request()
 			if(status == http::ParseStatus::error)
 			{
 				log::warn("[{}] bad request: {}", remote, parser.error_reason());
-				co_await write(http::serialize(error_response(400), false));
+				co_await write(http::serialize(error_response(400), false, false));
 				co_return false;
 			}
 		}
@@ -126,7 +126,7 @@ asio::awaitable<bool> Session::read_request()
 		if(buffered == buffer.size())
 		{
 			log::warn("[{}] request header too large", remote);
-			co_await write(http::serialize(error_response(431), false));
+			co_await write(http::serialize(error_response(431), false, false));
 			co_return false;
 		}
 

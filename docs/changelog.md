@@ -5,6 +5,12 @@
 
 ## 2026-10-13
 
+- **协议层应答：405 / OPTIONS 带 `Allow`，HEAD 复用 GET** ✅ —— 见 `http-server-plan.md` §11.2 G。
+  `dispatch`（`server/route.cpp`）里“逐棵动词树试一遍”的结果现在被留下来算 `Allow`；HEAD 没有显式 `Head<>` 时落到同路径的 GET。
+  正文抑制收口在 `http::serialize(response, keep_alive, head_only)`（`session.cpp` 传 `req.method == "HEAD"`）→ 显式 `Head<>` 也不会漏发体。
+  ⚠️ 用户决定：`Allow` 里 **GET 存在时带上 HEAD**（RFC 9110 §9.3.2），紧跟 GET。
+  复核：`./tests/run.sh`（17/17，含 `Allow: GET, HEAD, POST`、`HEAD /both` 的 `Content-Length: 14` 证明显式优先）。
+
 - **统一语言标准：`set(CMAKE_CXX_EXTENSIONS OFF)`（`-std=gnu++23` → `-std=c++23`）** ✅ —— clice 索引退化的根因。
   起因：clice 对 `server/route.cpp` 里一部分符号没反应。日志（`.clice/logs/<会话>/master.log`）：
   `BuildPCM failed for module pylai:route: GNU extensions was disabled in precompiled file …/pcm/jk-….pcm but is currently enabled`

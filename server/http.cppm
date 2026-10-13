@@ -45,8 +45,9 @@ struct Response
 	std::string body;
 };
 
-// 把响应写成线上字节。keep_alive 决定 Connection 头。
-std::string serialize(const Response& response, bool keep_alive);
+// 把响应写成线上字节。keep_alive 决定 Connection 头；head_only 抑制正文
+// （HEAD 请求：Content-Length 仍按 response.body 报，但不发体）。
+std::string serialize(const Response& response, bool keep_alive, bool head_only);
 
 enum class ParseStatus
 {

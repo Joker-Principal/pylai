@@ -207,3 +207,24 @@ chars(0)  →  param(1)  →  catch_all(2)  →  end_mark(3)
 | `/` · `/a/` · `/a/{$}` | `{}` —— **匿名占位符不计入** |
 
 这份顺序就是**捕获顺序**：匹配时第 i 个命名占位符写进 `captures[i]`。
+
+## 7. 协议层应答（405 / OPTIONS / HEAD）
+
+这三样都由框架答，**不用你写 handler**；只有想盖掉默认行为时才需要显式注册。
+
+| 请求 | 框架怎么答 |
+|---|---|
+| 路径在、动词不符 | `405` + `Allow: <该路径已注册的动词>` |
+| `OPTIONS`，没写 `Options<>` | `204` + `Allow`（无体、不发 `Content-Type`） |
+| `HEAD`，没写 `Head<>` | 复用同路径的 **GET** handler：跑它、**不发正文**、`Content-Length` 按 GET 的体算 |
+| `HEAD`，写了 `Head<>` | 显式那条优先（同样不发正文） |
+| 路径不存在 | `404`（三者一致） |
+
+`Allow` 的两条规则：
+
+- 顺序 = 注册顺序（`GET` → `POST` → `PUT` → `DELETE` → `HEAD` → `OPTIONS` → `PATCH` 中出现过的那些）；
+- **路径上有 `GET` 却没有显式 `Head<>` 时补一个 `HEAD`**，紧跟 GET 之后 —— RFC 9110 §9.3.2 把 HEAD 当作 GET 的隐含搭档。
+  所以只写一条 `Get<"/health">`，`Allow` 就是 `GET, HEAD`。
+
+> ⚠️ “不发正文”是在 `http::serialize(response, keep_alive, head_only)` 里收口的（`session.cpp` 传 `req.method == "HEAD"`）——
+> 于是**显式 `Head<>` 的 handler 就算填了 `response.body` 也不会发出去**（但它的长度会出现在 `Content-Length` 里）。

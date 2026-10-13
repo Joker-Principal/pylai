@@ -337,7 +337,7 @@ $\sigma$ = 争用项，$\kappa$ = 一致性项（**拐点后吞吐反而下降**
 
 | 阶段 | 内容 | 验证 |
 |---|---|---|
-| **0** | HTTP/1.1 基线：单 io_context + io_uring，固定线程数，keep-alive，**有界队列 + 在途上限 + 超时**（哪怕固定值）。**无指标、无自适应、无 TLS**。<br>🟡 **进行中**<br>✅ 已跑通：llhttp 解析（pipeline / 半包 / 400 / 431）、keep-alive、空闲与写超时、**取消传播**（每连接独立 `cancellation_signal` + `plf::hive` 注册表，见 `asio-notes.md` §7）、SIGINT 优雅停机、io_uring 后端（实测 `anon_inode:[io_uring]`）、**声明式路由**（`route_on` + 编译期冲突检查 + 每 method 一棵树，见 §11.2 C）<br>❌ 尚差：**有界队列 / 准入控制**、**外部压测 60s 基线**、**请求体**（`Request` 还没有 `body`，llhttp 也没接 `on_body`）<br>🟡 进行中：405 的 `Allow` 头、HEAD / OPTIONS 自动应答（语义已定，见 §11.2 G） | 外部压测 60s 无泄漏无挂死，记录基线 |
+| **0** | HTTP/1.1 基线：单 io_context + io_uring，固定线程数，keep-alive，**有界队列 + 在途上限 + 超时**（哪怕固定值）。**无指标、无自适应、无 TLS**。<br>🟡 **进行中**<br>✅ 已跑通：llhttp 解析（pipeline / 半包 / 400 / 431）、keep-alive、空闲与写超时、**取消传播**（每连接独立 `cancellation_signal` + `plf::hive` 注册表，见 `asio-notes.md` §7）、SIGINT 优雅停机、io_uring 后端（实测 `anon_inode:[io_uring]`）、**声明式路由**（`route_on` + 编译期冲突检查 + 每 method 一棵树，见 §11.2 C）、**协议层应答**（405/OPTIONS 的 `Allow`、HEAD 复用 GET，见 §11.2 G）<br>❌ 尚差：**有界队列 / 准入控制**、**外部压测 60s 基线**、**请求体**（`Request` 还没有 `body`，llhttp 也没接 `on_body`） | 外部压测 60s 无泄漏无挂死，记录基线 |
 | **1** | **只测不调**：按 §4 的结论建在 "stream/请求" 层的指标；请求级直方图 + 计数器 + OS 侧；周期报告；**观测开销自测**；冻结模式 | 指标稳定；开销 < 1~2% |
 | **2** | 动态池：§5.4 上下界 + EWMA/死区/迟滞/冷却 + 护栏/限步/回滚/冻结。引入 TLS 作为可控 CPU 密集负载 | 阶跃负载收敛性；固定 N（含 2N）vs 动态；**CPU 密集 vs 阻塞型各跑一遍** |
 | **3** | **离线扫参 + 跨窗口累积**（利用允许停机维护）：维护窗口内重启扫参 → 归档 / 固化；指纹 + 版本化；冻结 / 重置 / 打印 | 第二次启动"进入良好区间所需时间"缩短；模型跨窗口改进（见 §7.2） |
@@ -489,7 +489,8 @@ auto server = pylai::Server::builder()
 >   `Table` / `On` / `table_selftest` **已删** —— `validate_group` 把它接进了真实注册路径，独立的"手工路由表"没用了
 > - 验证通道：**`tools/clice query`**（`--fresh` = 先重索引/重编译再回答）。命名检查才用 `clice lint`。
 >   `.clang-tidy` 已用 `HeaderFilterRegex` + `ExcludeHeaderFilterRegex` 把范围收窄到本工作区。
-> - **未落地 🔍**：405 的 `Allow` 头 · HEAD / OPTIONS 自动应答（**语义已定**，见 §G）· 运行期重建/切换活跃集合 · `Param` 的**转换失败语义**（现 `from_chars` 失败静默给 0）
+> - **协议层应答（已落地）** ✅：405 / OPTIONS 带 `Allow`（GET 存在时隐含 HEAD）、HEAD 复用 GET 且无体（见 §G）
+> - **未落地 🔍**：运行期重建/切换活跃集合 · `Param` 的**转换失败语义**（现 `from_chars` 失败静默给 0）
 
 #### C. 结构与实现
 
@@ -588,11 +589,13 @@ auto server = pylai::Server::builder()
 5. **静态优先 + 冲突报错会拒掉一些"看起来合理"的组合**（如 `/a/{x}` 与 `/a/{y}` 直接编译错）。
 6. **`{rest...}` / `{$}` / 尾斜杠子树 三者语义接近**，容易误用；实现时需给对照例子。
 
-#### G. 本层尚未决定
+#### G. 本层：决定与遗留
 
-- **HEAD** —— ✅ 已定（2026-10-13）：没写 `Head<>` 时，HEAD 复用同路径的 GET handler（响应**无体**、`Content-Length` 仍按 GET 算）；显式 `Head<>` 优先。**未落地 🔍**
-- **OPTIONS** —— ✅ 已定：自动应答 `204` + `Allow: …`（按该路径已注册的动词）；路径不存在 → 404。**未落地 🔍**
-- **405 的 `Allow` 头** —— 要做，和上面两条一批（都要“逐棵动词树试一遍”）。**未落地 🔍**
+- **HEAD** —— ✅ 已落地（2026-10-13）：没写 `Head<>` 时，HEAD 复用同路径的 GET handler（响应**无体**、`Content-Length` 仍按 GET 算）；显式 `Head<>` 优先。
+  抑制正文收口在 `http::serialize(response, keep_alive, head_only)` 一处（`session.cpp` 传 `req.method == "HEAD"`）→ 显式 `Head<>` 填了 `body` 也一并不发。
+- **OPTIONS** —— ✅ 已落地：自动应答 `204` + `Allow`（按该路径已注册的动词，无体、不声称 `Content-Type`）；路径不存在 → 404。
+- **405 的 `Allow` 头** —— ✅ 已落地，与上面两条同一批（都在 `dispatch` 里“逐棵动词树试一遍”）。
+  ⚠️ **用户决定（2026-10-13）**：路径上有 `GET` 而无显式 `Head<>` 时，`Allow` **要带上 HEAD**（RFC 9110 §9.3.2 的隐含搭档），位置紧跟 GET。
 - **重复注册同一 `(method, path)`** —— ✅ 已定（2026-10-13）：**编译期报错**（`validate_group`，错误里点名两条 pattern）。跨组不可能发生：一个 builder 只允许一次 `route_on`。**已落地 ✅**
 - **重建 API 形态**：`build()` 怎么暴露、"活跃集合"怎么表达
 - 路由分组 / 前缀挂载 / 中间件

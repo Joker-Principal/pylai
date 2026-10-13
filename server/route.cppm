@@ -41,7 +41,8 @@ public:
 	// `Builder::route_on` 只允许调一次（它返回的 builder 已经没有 route_on 了）。
 	void set_routes(std::vector<VerbRoutes> routes);
 
-	// 未匹配返回 404；path 存在但 method 不匹配返回 405。
+	// 命中 → handler；HEAD 没有显式 `Head<>` 时落到同路径的 GET（正文由 serialize() 按 HEAD 抑制）；
+	// 路径存在但动词不符 → 405 + `Allow`；OPTIONS 没有显式 `Options<>` 时自动 204 + `Allow`；否则 404。
 	asio::awaitable<http::Response> dispatch(const http::Request& request) const;
 
 private:
