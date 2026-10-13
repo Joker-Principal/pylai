@@ -13,6 +13,14 @@
   复核：重建后新会话 `BuildPCM failed` / `GNU extensions` 均 **0** 条；`route.cpp` 符号 19 → **50**，`Router::dispatch` 恢复 `HasDefinition` + `route.cpp: definitions=1`；`session.cpp`（早就 `import jk;`）同样 19 → 146。
   细节与征兆见 `modules.md`（跨 target PCM 选项必须一致）。
 
+- **本机 clice 配置：`readonly` 必须保持 `off`** ✅ —— 起因：加了它之后编辑器里导航/补全变差。定位：`[project] readonly` 管的**不是**索引写锁，而是
+  **给打开的文件建不建完整 AST**；`auto` = 文件一律先只由后台索引作答。证据（`.clice/logs/*/master.log`）：`off` 的会话有
+  `pch.cpp:300 PCH built`，`auto` 的会话 **PCH 活动 0 行**，且编辑器的 definition/references 全由 `[perf:index_query]` 直答 —— 而索引会漏符号
+  （`make_routes`）也留旧符号（`ParamSlot`）。→ 改回 `readonly = "off"`。
+  同时修**索引空转**：`.vscode/tmp/**` 探针不在任何 DB 里却被 tracker 拉进索引队列，每会话刷几十条“无法解析编译命令”（30 → 32 → 46 条，29 条 owed）
+  → 加规则 `patterns = [".vscode/tmp/**"]` + `index/lint/format = false`。
+  复核：重启服务后新会话真实失败数 **0**、调度 `total=20`（原 41~49）、`PCH built` 恢复、`Loaded CDB … with 63 entries` 仍在（规则未关掉数据库自动发现）。
+
 - **`pmf` 类型萃取改用 jk 的 `Callable`；形参表换 `TList`** ✅ —— 用户提示 jk 有 callable 工具。
   `RouteOf` 不再手写 `RouteOf<R (C::*)(Ps...)>` 偏特化（只匹配裸形式），改用 `JK::Meta::Return` / `Arguments`；
   `make_handler` 也不再分解 `R / C / Ps`。`Params` 由 `std::tuple` 换 `TList` → `ParamSlot` 递归 + `SlotOf` 偏特化（20 行）
