@@ -85,6 +85,7 @@ namespace dsl_selftest {
 
 struct User
 {
+public:
 	asio::awaitable<void> health(Get<"/health"> req, pylai::route::StringResponse& res);
 	asio::awaitable<void> submit(Post<"/submit/{id}"> req, pylai::route::StringResponse& res);
 	asio::awaitable<void> files(Get<"/files/{path...}"> req, pylai::route::EmptyResponse& res); // 响应形参是必需的
@@ -124,6 +125,7 @@ static_assert(Request<Verb::post, "/submit/{id}">{raw_request, not_a_number}.par
 // （旧的手写偏特化只匹配 `R (C::*)(Ps...)` —— 反证见 `.vscode/tmp/jk-callable-probe/old-trait.cpp`）。
 struct QualifiedUser
 {
+public:
 	asio::awaitable<void> ping(Get<"/c"> req, pylai::route::StringResponse& res) const;
 	asio::awaitable<void> post(Post<"/n/{id}"> req, pylai::route::StringResponse& res) noexcept;
 };

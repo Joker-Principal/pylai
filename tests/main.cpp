@@ -20,6 +20,7 @@ using namespace pylai::route;
 
 struct App
 {
+public:
 	asio::awaitable<void> health(Get<"/health"> req, pylai::route::StringResponse& res);
 	asio::awaitable<void> user(Get<"/users/{id}"> req, pylai::route::StringResponse& res);
 	asio::awaitable<void> submit(Post<"/submit/{id}"> req, pylai::route::StringResponse& res);

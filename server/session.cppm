@@ -25,15 +25,19 @@ public:
 	// 连接协程入口：静态入口 + 协程帧持有连接状态。
 	static asio::awaitable<void> handle(const Settings& settings, const route::Router& routes, asio::ip::tcp::socket socket);
 
+public:
 	// http::BodyReader：把下一段体交给 handler（实现见 session.cpp）。
 	[[nodiscard]] asio::awaitable<std::size_t> read_some(std::span<std::byte> out) override;
 
+public:
 	// http::ResponseWriter：带超时写一段字节（实现见 session.cpp）。空 error_code = 成功。
 	[[nodiscard]] asio::awaitable<std::error_code> write(std::span<const std::byte> bytes) override;
 
+public:
 	// http::BodyReader / http::ResponseWriter：两侧的字节通道。
 	[[nodiscard]] asio::any_io_executor get_executor() noexcept override { return socket.get_executor(); }
 
+public:
 	// 响应类型在**发响应头之前**读这两个值（头一写出去就冻结 / HEAD 抑制正文）。
 	[[nodiscard]] bool keep_alive() const noexcept override;
 	[[nodiscard]] bool head_only() const noexcept override { return head_request; }
@@ -41,6 +45,7 @@ public:
 private:
 	Session(const Settings& settings, const route::Router& routes, asio::ip::tcp::socket socket, std::string remote);
 
+private:
 	asio::awaitable<void> run();					 // keep-alive 主循环
 	asio::awaitable<bool> read_headers();		 // 解析到“头部完成”（交棒点） → true
 	asio::awaitable<bool> finish_message();		 // 让 llhttp 走完当前消息（停在下一个请求之前）

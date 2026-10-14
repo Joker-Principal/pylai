@@ -71,11 +71,13 @@ public:
 
 	static Builder builder();
 
+public:
 	~Server();
 
 	Server(const Server&) = delete;
 	Server& operator=(const Server&) = delete;
 
+public:
 	// 跑事件循环，直到 quit() 或 accept 循环结束。
 	int run();
 

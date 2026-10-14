@@ -43,10 +43,12 @@ public:
 	Router(const Router&) = delete;
 	Router& operator=(const Router&) = delete;
 
+public:
 	// 装上 `Builder::route_on` 声明出来的路由表。⚠️ 只该装一次 ——
 	// `Builder::route_on` 只允许调一次（它返回的 builder 已经没有 route_on 了）。
 	void set_routes(std::vector<VerbRoutes> routes);
 
+public:
 	// 命中 → handler（响应由 handler 的响应类型自己发到通道）；HEAD 没有显式 `Head<>` 时落到同路径的 GET（正文由响应类型按 HEAD 抑制）；
 	// 路径存在但动词不符 → 405 + `Allow`；OPTIONS 没有显式 `Options<>` 时自动 204 + `Allow`；否则 404。
 	// `ctx` 是这条事务的状态（报文数据 + 响应状态）；两个通道只能从连接层来。
@@ -68,6 +70,7 @@ struct FixedString
 public:
 	char data[n]{};
 
+public:
 	constexpr FixedString() noexcept = default;
 
 	constexpr FixedString(const char (&s)[n]) noexcept
@@ -186,6 +189,7 @@ public:
 	std::size_t n_names{0};
 	ParseError err{ParseError::none};
 
+public:
 	constexpr Pattern() noexcept { parse_into(); }
 
 	[[nodiscard]] constexpr bool ok() const noexcept { return err == ParseError::none; }
@@ -339,6 +343,7 @@ public:
 	std::uint32_t a{k_no_route};
 	std::uint32_t b{k_no_route};
 
+public:
 	[[nodiscard]] constexpr bool ok() const noexcept { return a == k_no_route; }
 };
 
@@ -374,7 +379,6 @@ struct RadixNode
 template <std::size_t node_capacity>
 struct RadixTree
 {
-public:
 	static constexpr std::size_t edge_capacity = (node_capacity == 0) ? 0 : node_capacity - 1;
 
 	std::array<RadixNode, node_capacity> nodes{};
@@ -427,6 +431,7 @@ public:
 	std::size_t seg{0};
 	std::size_t consumed{0}; // 当前字符片段已被吃掉多少字符
 
+public:
 	[[nodiscard]] constexpr bool done() const noexcept { return seg >= pattern.size; }
 
 	[[nodiscard]] constexpr Piece base() const noexcept
@@ -775,6 +780,9 @@ public:
 		return names.size();
 	}
 
+	using executor_type = asio::any_io_executor; // asio 的流概念要求这个成员类型
+
+public:
 	// 框架专用（`make_arg` 调它）；用户不要直接构造。
 	// `constexpr` 是为了让编译期自检能直接构造一个请求对象（见 `server/route.checks.cpp`）；
 	// 那时没有连接 ⇒ `in` 留空 —— 那种场合只有 `param<>()` 这类“读报文数据”的用法是安全的。
@@ -784,9 +792,11 @@ public:
 		in_(in)
 	{}
 
+public:
 	// 报文数据（框架解析出来的 start line + headers）。
 	[[nodiscard]] const http::Request& raw() const noexcept { return raw_; }
 
+public:
 	// 读本请求的体：视图把“报文数据”与“读通道”合到一处，handler 用起来还是一件东西。
 	// ⚠️ 体是**字节**：要文本语义得自己 `http::as_text(...)`。
 	[[nodiscard]] asio::awaitable<std::vector<std::byte>> body() const
@@ -801,7 +811,6 @@ public:
 	}
 
 	// 读通道 ⇒ 拿着 handler 里的 `req` 就能用 asio 的组合操作（`asio::async_read` …）。
-	using executor_type = asio::any_io_executor;
 	[[nodiscard]] executor_type get_executor() const noexcept
 	{
 		return in_ != nullptr ? in_->get_executor() : asio::any_io_executor{};
@@ -812,6 +821,7 @@ public:
 		return in_->async_read_some(buffers, std::forward<CompletionToken>(token));
 	}
 
+public:
 	// 按名字取命名捕获 —— 名字在**编译期**对着 pattern 校对（写错就编不过）。
 	// 整数走 `from_chars`（与旧的位置注入同语义：转换失败静默给 0）；string_view 直通。
 	template <class T, FixedString name>
@@ -876,10 +886,12 @@ public:
 	ResponseCore(ResponseCore&&) noexcept = default;
 	ResponseCore& operator=(ResponseCore&&) noexcept = default;
 
+public:
 	[[nodiscard]] int status() const { return state().status; }
 	[[nodiscard]] std::string_view content_type() const { return state().content_type; }
 	[[nodiscard]] std::span<const http::Header> headers() const { return state().headers; }
 
+public:
 	template <typename Self>
 	auto&& status(this Self&& self, int code)
 	{
@@ -913,6 +925,7 @@ public:
 		return std::forward<Self>(self);
 	}
 
+public:
 	// 框架在调 handler 之前注入：状态的家（`Context`）+ 写通道。
 	// ⚠️ 顺带把上一次请求的响应状态清干净（Context 跨请求复用）⇒ **配置必须在 attach 之后**。
 	// 用显式对象参数是为了让 `self.apply_defaults()` 落到**具体类型**那份（基类只留个空实现）。
@@ -1000,6 +1013,7 @@ public:
 		return std::forward<Self>(self).body(std::as_bytes(std::span{text}));
 	}
 
+public:
 	// 还没发出去的体（定长类型 = 整个体）。
 	[[nodiscard]] std::span<const std::byte> body() const { return state().pending; }
 
@@ -1023,6 +1037,7 @@ private:
 // 有体、长度已知：长度就是 `body()` 攒下的字节数 ⇒ `Content-Length` 定界。
 export struct StringResponse : BodyResponse<false>
 {
+public:
 	void apply_defaults() noexcept { state().content_type = "text/plain; charset=utf-8"; }
 
 	// flush：发头 + 发体（HEAD 只发头）。定长体一次性发完 ⇒ flush 即收尾。
@@ -1035,6 +1050,7 @@ export struct StringResponse : BodyResponse<false>
 // 204 / 304 / 1xx 不得带 `Content-Length`（RFC 9110 §8.6）；其它状态码要 `Content-Length: 0` 才能定界。
 export struct EmptyResponse : ResponseCore
 {
+public:
 	void apply_defaults() noexcept { state().status = 204; }
 
 	asio::awaitable<std::error_code> flush();
@@ -1044,6 +1060,7 @@ export struct EmptyResponse : ResponseCore
 // 长度未知 ⇒ 响应侧 chunked：`body(块)` 攒进内存，`flush()` 的时候才作为一个块推出去。
 export struct UnknownLengthResponse : BodyResponse<true>
 {
+public:
 	void apply_defaults() noexcept { state().content_type = "text/plain; charset=utf-8"; }
 
 	// flush：头没发就先发头，然后把攒着的字节作为一个块发出去。

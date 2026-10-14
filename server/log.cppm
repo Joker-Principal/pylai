@@ -16,6 +16,10 @@ template<typename... Args>
 struct FormatStr
 {
 public:
+	spdlog::format_string_t<Args...> str;
+	std::source_location location;
+
+public:
 	template<std::convertible_to<std::string_view> StrLike>
 	consteval FormatStr(const StrLike& str, std::source_location location = std::source_location::current()) :
 		str(str),
@@ -23,9 +27,6 @@ public:
 	{}
 
 	consteval FormatStr(std::source_location location = std::source_location::current()) : str(), location(location) {}
-
-	spdlog::format_string_t<Args...> str;
-	std::source_location location;
 };
 
 template<typename... Args>

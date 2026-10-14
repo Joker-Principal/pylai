@@ -60,19 +60,22 @@ private:
 class BodyReader
 {
 public:
-	using executor_type = asio::any_io_executor;
+	using executor_type = asio::any_io_executor; // asio 的流概念要求这个成员类型
 
+public:
 	BodyReader() = default;
 	virtual ~BodyReader() = default;
 	BodyReader(const BodyReader&) = delete;
 	BodyReader& operator=(const BodyReader&) = delete;
 
+public:
 	// 交付下一段请求体（chunked 的块边界已由 llhttp 剥掉）：写进 out，返回写入字节数；
 	// 0 = 体已到尾。out 不得为空（否则 std::invalid_argument）；失败抛 BodyError。
 	virtual asio::awaitable<std::size_t> read_some(std::span<std::byte> out) = 0;
 
 	[[nodiscard]] virtual asio::any_io_executor get_executor() noexcept = 0;
 
+public:
 	// ⚠️ completion token 是模板 ⇒ 不可能虚化；门面内联在这里，虚实现仍是上面的 `read_some`。
 	// 只填**第一段非空** buffer：概念只要求“写了 ≥1 字节”，组合操作会自己循环。
 	// 内部用 0 表示“体到尾”，门面翻译成 asio 语义的 `eof`。
@@ -138,6 +141,7 @@ public:
 	bool chunked{false};
 	bool keep_alive{false};
 
+public:
 	// 这个请求有没有体（框架用来决定要不要让 llhttp 继续走完消息）。
 	[[nodiscard]] bool has_body() const noexcept { return chunked || content_length > 0; }
 };
@@ -157,6 +161,16 @@ enum class ParseStatus
 class RequestParser
 {
 public:
+	// **体阶段**的返回：本次消费 / 交付了多少、到尾没有、是不是协议错。
+	struct BodyStep
+	{
+		std::size_t consumed{0};  // 本次消费的输入字节数
+		std::size_t delivered{0}; // 写进 out 的载荷字节数
+		bool finished{false};	  // 该请求的体（整个消息）已到尾
+		bool failed{false};		  // 协议错误 —— error_reason() 里有原因
+	};
+
+public:
 	// max_body_bytes：请求体上限。声明的 Content-Length 超上限 ⇒ execute() 返回 too_large。
 	explicit RequestParser(std::size_t max_body_bytes);
 	~RequestParser();
@@ -166,24 +180,18 @@ public:
 	RequestParser(const RequestParser&) = delete;
 	RequestParser& operator=(const RequestParser&) = delete;
 
+public:
 	// **头部阶段**：喂字节直到 headers_complete（无体请求会一路走到 message_complete）。
 	// 返回后调用方应从缓冲区头部摘掉 consumed 字节。
 	ParseStatus execute(std::span<const std::byte> data, std::size_t& consumed);
 
 	// **体阶段**：载荷**直接写进 out**（最多 out.size() 字节，不缓存在 RequestParser 里）。
-	struct BodyStep
-	{
-		std::size_t consumed{0};  // 本次消费的输入字节数
-		std::size_t delivered{0}; // 写进 out 的载荷字节数
-		bool finished{false};	  // 该请求的体（整个消息）已到尾
-		bool failed{false};		  // 协议错误 —— error_reason() 里有原因
-	};
-
 	[[nodiscard]] BodyStep read_body(std::span<const std::byte> data, std::span<std::byte> out);
 
 	// 解除 headers_complete / message_complete 处的暂停（下一次 execute 前调用）。
 	void resume();
 
+public:
 	const Request& current() const;
 	Request& current(); // 当前这条请求的报文数据（解析完 start line + headers 后有效）
 
@@ -211,13 +219,15 @@ enum class WriteErrc
 class ResponseWriter
 {
 public:
-	using executor_type = asio::any_io_executor;
+	using executor_type = asio::any_io_executor; // asio 的流概念要求这个成员类型
 
+public:
 	ResponseWriter() = default;
 	virtual ~ResponseWriter() = default;
 	ResponseWriter(const ResponseWriter&) = delete;
 	ResponseWriter& operator=(const ResponseWriter&) = delete;
 
+public:
 	// 写一段线上字节（带超时）。返回空 error_code = 成功；否则是 `WriteErrc` ⇒ 这个响应已经没救了。
 	virtual asio::awaitable<std::error_code> write(std::span<const std::byte> bytes) = 0;
 
@@ -227,6 +237,7 @@ public:
 
 	[[nodiscard]] virtual asio::any_io_executor get_executor() noexcept = 0;
 
+public:
 	// `async_write_some` 允许“一次写完整块”（比概念要求的“写一部分”更强）；
 	// 单段零拷贝，多段才聚合（多段是少数）。
 	template <typename ConstBufferSequence, typename CompletionToken>
@@ -301,6 +312,7 @@ public:
 	std::vector<std::byte> pending;		   // 攒着还没出网的体
 	Stage stage{Stage::config};
 
+public:
 	// 清成初始态，但**保留缓冲容量**（复用 Context 的意义就在这里）。
 	void reset() noexcept
 	{
@@ -321,10 +333,12 @@ public:
 class Context
 {
 public:
-	using BodyStep = RequestParser::BodyStep;
+	using BodyStep = RequestParser::BodyStep; // 体阶段的返回类型（转发）
 
+public:
 	explicit Context(std::size_t max_body_bytes);
 
+public:
 	// ═══ 请求状态 ═══
 	[[nodiscard]] ParseStatus execute(std::span<const std::byte> data, std::size_t& consumed);
 	[[nodiscard]] BodyStep read_body(std::span<const std::byte> data, std::span<std::byte> out);
@@ -333,6 +347,7 @@ public:
 	[[nodiscard]] Request& request();
 	[[nodiscard]] std::string_view error_reason() const;
 
+public:
 	// ═══ 响应状态 ═══
 	[[nodiscard]] ResponseState& response() noexcept { return response_; }
 	[[nodiscard]] const ResponseState& response() const noexcept { return response_; }
