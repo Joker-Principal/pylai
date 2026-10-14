@@ -9,12 +9,14 @@
 
 ## 0. 环境与版本
 
+> 版本**随 vcpkg 根更新而变** ⇒ 以 `build-dev_llvm/vcpkg_installed/vcpkg/status` 里的实测值为准（`grep -E '^Package:|^Version:' …/status | paste - -`）。
+
 | 项 | 值 |
 |---|---|
 | asio | **1.38.2**，通过 **overlay port** 提供（见 §1），不是 vcpkg 内置端口 |
 | liburing | vcpkg 端口，静态 `liburing.a` + `liburing.pc` |
-| OpenSSL | vcpkg `3.6.2`（≥3.2，理论上可支撑 ngtcp2 的 QUIC crypto） |
-| Boost | vcpkg `1.90.0`（`boost-context` / `boost-asio`） |
+| OpenSSL | vcpkg `3.6.5`（≥3.2，理论上可支撑 ngtcp2 的 QUIC crypto） |
+| Boost | vcpkg `1.92.0`（`boost-context` / `boost-asio`） |
 | 编译器 / 构建 | clang++ 23，C++23，Ninja Multi-Config，C++20 modules |
 | CMake | 4.4.4；但项目 `cmake_minimum_required` **保持 3.28** |
 | 构建 / 环境 | 命令、工具纪律见 **`AGENTS.md`** |
@@ -178,6 +180,7 @@ EOF
 
 复现用例：`.vscode/tmp/asio-cancel-probe/probe_bind_slot.cpp`
 （纯头文件版，无模块、无 CMake，`clang++ -std=c++23 …` 直接编）。
+⚠️ 那是**当时的一次性探针**，而 `.vscode/` 已在 `.gitignore` 里 ⇒ **不在版本库里**；要复核请按上面三条条件自己重建。
 
 对照：**只让会话绑、accept 不绑** → 连续三条路径（超时 ×2 / 有数据 / 并发空闲连接）**都不崩**。
 
@@ -276,6 +279,8 @@ cancellation_slot::clear()                            include/asio/impl/cancella
 - `.vscode/tmp/asio-cancel-probe/run_bind_slot_test.py` —— 驱动脚本
 - `build-asan/` —— pylai 的 ASan 构建
 
+⚠️ 上面前三条在 `.vscode/tmp/` 里 ⇒ **都不在版本库**（`.vscode/` 已 gitignore）；`build-asan/` 也是本机构建目录。要复核就按条件重建。
+
 **重要旁证**：`standalone/asio.cppm` 末尾的
 
 ```cpp
@@ -307,10 +312,13 @@ namespace std { using std::coroutine_traits; }
 模块的接口单元本身就是编译边界，改 `server.cpp` 不触发依赖方重编 ——
 pimpl 存在的最大理由已经由模块代劳。
 
-### 线程模型：每线程一套 Router —— 🟡 目标模型，尚未落地
+### 线程模型：❓ 待定 —— 与线程池一起设计（`http-server-plan.md` §5）
 
-- 目标：**每线程一个 `io_context` + 各自一个 acceptor（SO_REUSEPORT）**，对齐 hical。
-  于是每个线程一整套 `Router`，`sessions` 只被所属线程访问：
+- ⚠️ **修订（2026-10-14）**：此前写的“每线程一个 `io_context` + 各自一个 acceptor（SO_REUSEPORT），对齐 hical”是**过时说法** ——
+  我们**不打算对齐 hical**；单机之内的并发 / 分片模型**还没定**，要和**线程池尺寸一起设计**。
+  下面那张“每线程一套 `Router` ⇒ 访问天然无同步”的推论，只有在那个模型定下来之后才成立 —— **现在只当候选方案记录**。
+
+- 候选：**每线程一个 `io_context` + 各自一个 acceptor**，于是每个线程一整套 `Router`，`sessions` 只被所属线程访问：
 
   | 访问 | 冷/热 | 同步 |
   |---|---|---|

@@ -51,7 +51,9 @@
 
 ### 1.4 非目标
 
-- **不做多机 / 分布式协调** —— 单机多核内做深。留白清单因此**不给** `SO_REUSEPORT` / 分片留位置。
+- **不做多机 / 分布式协调** —— 单机多核内做深。
+  ⚠️ **修订（2026-10-14）**：这里原来还接着写“留白清单因此**不给** `SO_REUSEPORT` / 分片留位置” —— **措辞不对**：
+  单机**之内**的并发 / 分片模型**尚未定**（与线程池一起设计，见 §5），不能拿“不做多机”把单机内的手段也一并否掉。
 - **但要生产级健壮性**（不是“研究用”）—— 因为公网内容供应要真的对外。
   ⚠️ 这与**有界资源**（现排在 Stage 2）是同一条，不能因为“先到 MU”就丢掉。
 
@@ -69,7 +71,7 @@
 | 静态 / 大文件响应 | 响应类型（§4.1.1 的 `FileResponse`） | 公网那一轮 |
 | 响应压缩 | 响应类型的包装 | 同上 |
 | H2 / H3 | §4 已定“单位 = stream / 请求” | 大工程，独立轨道 |
-| 指标 / 控制器 | **形态定形时留观测点 / 可调参数 / 指纹挂点** —— 落点与形状见 §4.1.4（🟡 已设计，待落地） | 留位不实现 |
+| 指标 / 控制器 | **形态定形时留观测点 / 可调参数 / 指纹挂点** —— 落点与形状见 §4.1.4（✅ 空壳已落地） | 留位不实现 |
 | 多机 | ❌ 明确不留（§1.4） | — |
 
 ### 1.6 上游关系
@@ -80,10 +82,10 @@
 
 | 项 | 约定 | 来源 |
 |---|---|---|
-| 监听 | **只监听 `127.0.0.1`**【定】 | `herodotus/docs/ARCHITECTURE.md` §2.2 |
-| 基地址 | `127.0.0.1:7788`【定】（本地开发先用 18080） | `herodotus/docs/PLAN.md` §8.1 |
-| 命名 | 库 `herodotus` + 可执行 `clio`；模块 `herodotus.clio.<domain>` | `clio/README.md` |
-| HTTP 底座现状 | `clio/cmake/deps.cmake`：**hical 取代 cpp-httplib** | 代码为准（PLAN 表未同步） |
+| 监听 | **只监听 `127.0.0.1`**【定】 | — |
+| 基地址 | `127.0.0.1:7788`【定】（本地开发先用 18080） | — |
+| 命名 | 库 `herodotus` + 可执行 `clio`；模块 `herodotus.clio.<domain>` | — |
+| HTTP 底座现状 | 已由 **hical 取代 cpp-httplib**（以 clio 侧代码为准，本仓库不跟踪其构建脚本） | — |
 
 **hical**（[Hical61/Hical](https://github.com/Hical61/Hical)，MIT，v2.7.0，活跃）是**要取代的对象**，
 也是灵感来源：Boost.Asio + `asio::awaitable` 协程 + `picohttpparser` 零拷贝 + PMR 三层池
@@ -109,7 +111,7 @@
 | **L4 参数与自学习** | 怎么把测出来的东西沉淀下来？ | §7 |
 | （横切）内存分配 | 每一层都在分配，边界画在哪？ | §8 |
 
-> 之后是 §9 路线图、§10 未决问题、§11 研究方法。
+> 之后是 §9 路线图、§10 未决问题、§11 路由设计、§12 研究方法。
 
 **起点（✅ 仓库现状）**：`standalone/` 是纯 module 封装层（细节见 `docs/asio-notes.md`）；
 `ports/asio/` + `vcpkg-configuration.json` 让 asio 1.38.2 走 overlay port；
@@ -121,7 +123,7 @@
 
 **要解决的**：从连接上读到的字节流，解析成 method / path / header / body；以及把响应序列化回去。
 
-**候选（🔍 全部待评估，用户对选型有保留意见）**
+**候选（🔍 HTTP/2 · HTTP/3 仍待评估，用户对选型有保留意见；HTTP/1.1 已选定 `llhttp`，但保留推翻权）**
 
 已核实的 vcpkg 可用性（本地 vcpkg 根已更新至最新 master）：
 
@@ -188,7 +190,7 @@
 
 | 阶段 | 谁 | 做什么 |
 |---|---|---|
-| 读 head | 框架 | llhttp 停在 `on_headers_complete`（里面返回 `HPE_PAUSED`，`server/http.cpp:144`）→ method / target / headers |
+| 读 head | 框架 | llhttp 停在 `Step1Parser::on_headers_complete`（里面返回 `HPE_PAUSED`，`server/http.cpp`）→ method / target / headers |
 | 路由 | 框架 | 只看 method + path，**体不参与**；404 / 405(+`Allow`) / OPTIONS 自动 204 仍由框架答 |
 | 交棒 | 框架 → handler | 构造两个形参：typed 请求 `req` + 响应对象 `res`，然后调用 handler |
 | 读体 | handler | `co_await req.body()` / `co_await req.read_some(buf)`；chunked 的块边界仍由 llhttp 剥（不变） |
@@ -201,7 +203,7 @@
 #### 4.1.1 handler 签名：声明住在第一个形参（✅ 已落地）
 
 ```cpp
-asio::awaitable<void> handle(Get<"/health"> req, http::StringResponse& res);
+asio::awaitable<void> handle(Get<"/health"> req, route::StringResponse& res);
 ```
 
 | 项 | 现状 |
@@ -252,8 +254,8 @@ co_await res.status(201).content_type("application/json").header("X-Trace", "abc
 3. **handler 不 flush 怎么办**：框架在 handler 返回后兜底 `co_await response.finish()`（幂等）—— “链完了忘了发”不会把连接卡死。
 4. **multipart**：不是 llhttp 的活，是 body 之上的**增量**解析器。先只给全量 `co_await req.body()`（受 `max_body_bytes` 约束），流式与 multipart 留到有真实需求。
 
-> 已验证可沿用：`RequestParser::execute()` 已把 `HPE_PAUSED` 翻成 `headers_complete` / `message_complete` 两个状态，
-> `resume()` 解暂停（`server/http.cpp:220~229`）——“继续喂字节”已经是 handler 可驱动的入口（`Session::read_some`）。
+> ✅ 已验证可沿用：`RequestParser::execute()` 已把 `HPE_PAUSED` 翻成 `headers_complete` / `message_complete` 两个状态，
+> `RequestParser::resume()` 解暂停（都在 `server/http.cpp`）—— “继续喂字节”已经是 handler 可驱动的入口（`Session::read_some`）。
 
 **本层还要决定的** → 已展开为 §4.1.2：
 
@@ -312,13 +314,13 @@ handler 看到的响应形参是**具体类型**（`StringResponse` 等，编译
 
 | 情形 | 处理 | 理由 |
 |---|---|---|
-| `Content-Length` 已声明且 > 上限 | **`on_headers_complete` 阶段就回 413 + close，不进路由** | `content_length` 此时已知（`server/http.cpp:137`），比“边收边判”更早 |
+| `Content-Length` 已声明且 > 上限 | **`on_headers_complete` 阶段就回 413 + close，不进路由** | `content_length` 此时已在同函数里拿到（`server/http.cpp`），比“边收边判” 更早 |
 | 长度未知（chunked） | reader 计数，超限 ⇒ 错误 ⇒ 框架兜 413 + close | 无法预判 |
 | 任意 413 | **必须关连接**（体没读完、不 drain） | 与“未读体 ⇒ close”同一条规则 |
 
 **D. 未读体 ⇒ `Connection: close`** 的落地细节：
 handler 返回后框架看 `reader.exhausted()`；未读完 ⇒ `keep_alive = false`。⚠️ 但 `Connection` 头的值早就采样并**冻结**了
-（`Session::write()` 第一次被调时定下，`server/session.cpp:286~291`）—— 因为推式响应在 handler 还活着时就把头发了出去。
+（`Session::write()` 第一次被调时定下，`server/session.cpp`）—— 因为推式响应在 handler 还活着时就把头发了出去。
 冻结那一刻用的就是“体读完了吗”（`body_finished`），所以要么在第一次 `write()` 之前读完体，要么就是 close。
 ⚠️ 🟡 **风险**：客户端已发出体而服务器直接关闭，部分客户端会报 “connection reset”。
 e2e 已各加一条用例（handler 完全不读 / 读一半）看真实表现，再决定要不要“先 drain 掉已缓冲的那点字节”。
@@ -328,13 +330,13 @@ e2e 已各加一条用例（handler 完全不读 / 读一半）看真实表现�
 
 **E. 控制流反转：谁驱动 llhttp**
 
-现状是 `Session::read_headers()` 自己循环 `execute → complete → consume + resume`（`server/session.cpp:139`）。交棒后：
+现状是 `Session::read_headers()` 自己循环 `execute → complete → consume + resume`（`server/session.cpp`）。交棒后：
 
 | 步骤 | 谁 | 依据 / 状态 |
 |---|---|---|
 | 停点位 | 头部阶段停在 `on_headers_complete`、消息收尾停在 `on_message_complete`（各停一次） | `execute` 把 `HPE_PAUSED` 翻成两个状态，`resume()` 解暂停 |
 | keep_alive / path / query | 都在 `on_headers_complete` 里算（此时都已定型） | ✅ 依据见下方注 |
-| 继续喂字节 | handler 侧：先把**已缓冲**的 `buffer[consumed, buffered)` 喂给 `parser.resume()`；不够才 `fill_buffer()` | ✅ 复用 `fill_buffer()` 里的 `idle_timeout`（`server/session.cpp:256`）⇒ handler 绕不过超时/取消 |
+| 继续喂字节 | handler 侧：先把**已缓冲**的 `buffer[consumed, buffered)` 喂给 `parser.resume()`；不够才 `fill_buffer()` | ✅ 复用 `Session::fill_buffer()` 里的 `idle_timeout`（`server/session.cpp`）⇒ handler 绕不过超时/取消 |
 | 载荷交付 | `on_body` 把载荷写进**调用者给的缓冲**（不缓存在 RequestParser 里、不暂停 llhttp） | 为何不在 `on_body` 里 pause：① 暂停后可能“无字节可喂而挂住”；② 未领完的载荷得挂一个指向内部缓冲的 span，而 `consume()` 会 memmove 使 span 失效。<br>⇒ **每次喂给 llhttp 的输入窗口夹到 `out.size()`**，`on_body` 拿到的载荷必在输入区间内、必定放得下 |
 | 进度记账 | ✅ **不需要新机制** | 就用 llhttp 的 `consumed`（= `error_pos - data`）+ 窗口夹取；`Session::consume()` 用法不变 |
 | 失败怎么表达 | ✅ `http::BodyError{status, message}`：413（chunked 超限）/ 400（体协议错）/ 0（对面断了，无响应可发） | 连接层一个 catch 收口（`session.cpp` 的 `run()`） |
@@ -522,7 +524,7 @@ $\sigma$ = 争用项，$\kappa$ = 一致性项（**拐点后吞吐反而下降**
 
 ## 6. L3 观测层：我们怎么知道现在好不好
 
-**观测点必须落在应用层**——`asio-module` 不知道"请求"是什么（`AGENTS.md` §1）。
+**观测点必须落在应用层**——`asio-module` 不知道“请求”是什么（目录职责以根 `README.md` 的目录地图为准）。
 
 | 能观测 | 只能从 OS 取 | **观测不到** |
 |---|---|---|
@@ -608,7 +610,7 @@ $\sigma$ = 争用项，$\kappa$ = 一致性项（**拐点后吞吐反而下降**
 - **目标函数交给用户**：机器出 Pareto 前沿（吞吐 vs p99 vs CPU-秒/请求），人选点。
 - 安全：**护栏 + 限步 + 灰度 + 劣化自动回滚 + 冻结开关**。没有冻结模式就无法做可复现压测。
 - 同时自适应的参数**不超过 3~4 个**。
-- 纪律（一次只动一个维度、丢弃过载窗口数据等）见 `AGENTS.md` §5；
+- 纪律（一次只动一个维度、丢弃过载窗口数据等）见 §4.1.4；
   注意 §7.2 给出了"重启即可干净归因"的例外。
 
 ---
@@ -632,7 +634,7 @@ $\sigma$ = 争用项，$\kappa$ = 一致性项（**拐点后吞吐反而下降**
 | 阶段 | 内容 | 验证 |
 |---|---|---|
 | **0** | **协议基线**：单 io_context + io_uring，固定线程数，keep-alive，超时（空闲 / 写）。**无指标、无自适应、无 TLS**。✅ **已完成**（过程与证据见 `changelog.md`）<br>⚠️ 其中**声明式路由 / 协议层应答 / 请求体**三项已被 Stage 1 重新打开（形态变更） | 能稳定服务（外部基线见 Stage 2） |
-| **1** | **框架形态定形**（交棒 ✅ 已落地，§4.1.2）：响应类型多种（§4.1.1）✅ · 擦除点合并（§11.2 C）✅ · **留出观测点 / 可调参数 / 指纹挂点**（§1.1）🟡 | e2e 全绿；接口能承担 clio；文档与实现一致 |
+| **1** | **框架形态定形**（交棒 ✅ 已落地，§4.1.2）：响应类型多种（§4.1.1）✅ · 擦除点合并（§11.2 C）✅ · **留出观测点 / 可调参数 / 指纹挂点**（§1.1 · 落点 §4.1.4）✅ 空壳已落地 | e2e 全绿；接口能承担 clio；文档与实现一致 |
 | → **MU** | 🎯 **最小可用 = Stage 1 完成即达**。只服务 clio（本地、无 TLS、小请求） | C++ 模块可被 `import` 消费；拿去 clio 试用 |
 | **2** | **有界资源与稳定性验收**：有界队列 / 在途上限 / 准入控制（固定值即可）+ **外部压测 60s 基线** | 60s 无泄漏无挂死，记录基线 |
 | **3** | **只测不调**：按 §4 的结论建在 "stream/请求" 层的指标；请求级直方图 + 计数器 + OS 侧；周期报告；**观测开销自测**；冻结模式 | 指标稳定；开销 < 1~2% |
@@ -680,10 +682,11 @@ $\sigma$ = 争用项，$\kappa$ = 一致性项（**拐点后吞吐反而下降**
 
 ### 11.2 路由设计定案（✅ 已落地）
 
-> 🟡 **性质**：下列每一条都是用户**逐项拍板**的结果；仍有未决项，逐条在对应小节标了状态。
+> ✅ **性质**：下列每一条都是用户**逐项拍板**、且**已落地**的结果（e2e 与 `route.checks.cpp` 的 `static_assert` 钉住）。
+> ⚠️ 标 ✅ **只表示“已实现”，不代表“语义已冻”** —— 用户随时可推翻，推翻即改代码。真正的未定项逐条标 🟡 / 🔍 / ❓。
 > 编译期用例在 `server/route.checks.cpp`（`pylai` 的**实现单元**：要看不导出的内部件，跟着 `cmake --build` 一起求值）。
 
-**一句话**：`Get<">...">` 写在**第一个形参**上声明一条路由（它同时就是请求） → **`constexpr` 构建器**在编译期解析 pattern、
+**一句话**：`Get<"...">` 写在**第一个形参**上声明一条路由（它同时就是请求） → **`constexpr` 构建器**在编译期解析 pattern、
 把整包压成**一棵字符级 radix tree** → 运行期持表匹配；路径参数在 handler 里用 `req.param<T, "名字">()` 取，
 **注册点**（`Builder::route_on`）做 pattern ↔ handler 的编译期交叉核对（合法性与冲突）。
 
@@ -692,8 +695,8 @@ using namespace pylai::route;
 
 struct App
 {
-	asio::awaitable<void> health(Get<"/health"> req, http::StringResponse& res);
-	asio::awaitable<void> user(Get<"/users/{id}"> req, http::StringResponse& res);
+   asio::awaitable<void> health(Get<"/health"> req, route::StringResponse& res);
+   asio::awaitable<void> user(Get<"/users/{id}"> req, route::StringResponse& res);
 };
 
 App app;
@@ -707,14 +710,14 @@ auto server = pylai::Server::builder()
 
 | 项 | 决定 | 状态 |
 |---|---|---|
-| 路径参数 | `{name}`；字面量花括号写 `{{` / `}}` | 🟡 |
-| catch-all | `{rest...}`（Go 1.22 写法）；**只允许出现在末尾**，中间出现 → 报错；**至少吃掉一段**（`/files` 不命中 `/files/{p...}`，`/files/` 命中且 `p=""`） | 🟡 |
-| 参数名 | 任意非空（不含 `{` `}` `/`）；**同一路由内不可重名** | 🟡 |
-| 尾斜杠 | `/a` 与 `/a/` **不同**；采用 **Go 1.22 语义**：路径**以 `/` 结尾 = 匿名 `...` 通配（子树匹配）** | 🟡 |
-| `{$}` | 保留：`/a/{$}` 只匹配 `/a/`，用来"钉住到此为止"（对应 Go 的 `{$}`） | 🟡 |
-| 百分号解码 | **逐段解码**；`%2F` **不作为段分隔符**（Go 1.22 行为） | 🟡 |
-| regex 路由 | **不做** | 🟡 |
-| 段内前后缀（`img-{id}.png`） | **不做** —— 理由见下 | 🟡 |
+| 路径参数 | `{name}`；字面量花括号写 `{{` / `}}` | ✅ |
+| catch-all | `{rest...}`（Go 1.22 写法）；**只允许出现在末尾**，中间出现 → 报错；**至少吃掉一段**（`/files` 不命中 `/files/{p...}`，`/files/` 命中且 `p=""`） | ✅ |
+| 参数名 | 任意非空（不含 `{` `}` `/`）；**同一路由内不可重名** | ✅ |
+| 尾斜杠 | `/a` 与 `/a/` **不同**；采用 **Go 1.22 语义**：路径**以 `/` 结尾 = 匿名 `...` 通配（子树匹配）** | ✅ |
+| `{$}` | 保留：`/a/{$}` 只匹配 `/a/`，用来“钉住到此为止”（对应 Go 的 `{$}`） | ✅ |
+| 百分号解码 | **逐段解码**；`%2F` **不作为段分隔符**（Go 1.22 行为） | ✅ |
+| regex 路由 | **不做** | ✅ |
+| 段内前后缀（`img-{id}.png`） | **不做** —— 理由见下 | ✅ |
 
 > **段内前后缀为什么不做**
 > 用户一度要求加上（"段内前后缀可能很有用"），语义也已定（一段内最多一个参数；**非贪婪**、失败再放宽；`{x...}` / `{$}` 不进段内）。
@@ -734,10 +737,10 @@ auto server = pylai::Server::builder()
 
 | 项 | 决定 | 状态 |
 |---|---|---|
-| 优先级 | **静态优先**：静态边 → 参数边 → 通配边 | 🟡 |
-| 冲突定义 | **“分歧点上必须有字面量”**。<br>分歧点是**字面量** → 它 rank 最高、一眼看得出谁赢 → **放行**（如 `/a/{x}/c` + `/a/b/{y}`）<br>分歧点是**两个通配符** → 没有字面量可定优先级 → **报错**（如 `/a/{x}` + `/a/{y...}`、`/a/{y...}` + `/a/{$}`）<br>公共前缀完全同形**且等长** → 落在同一节点、后注册覆盖前一个 → **报错**（重复注册 / 同形异名 / `/files/` 与 `/files/{p...}`） | 🟡 |
-| 与 Go 的差异 | ✅ 已核实（`src/net/http/pattern.go` 的 `compareSegments` / `combineRelationships`）：Go 用**"谁更具体"**定序，于是 **放过** `/a/{x}`+`/a/{y...}`（`s2.multi` → `moreSpecific`）、**拒掉** `/a/{x}/c`+`/a/b/{y}`（`moreGeneral` ∧ `moreSpecific` → `overlaps`）。**我们恰好相反** —— 因为我们靠**字面量**定序，不靠"谁更具体" | ✅ |
-| 报错时机 | ❌ **不需要运行期报错**——用户判断：**类型信息在编译期，错误的路由表无法通过编译** | 🟡 |
+| 优先级 | **静态优先**：静态边 → 参数边 → 通配边 | ✅ |
+| 冲突定义 | **“分歧点上必须有字面量”**。<br>分歧点是**字面量** → 它 rank 最高、一眼看得出谁赢 → **放行**（如 `/a/{x}/c` + `/a/b/{y}`）<br>分歧点是**两个通配符** → 没有字面量可定优先级 → **报错**（如 `/a/{x}` + `/a/{y...}`、`/a/{y...}` + `/a/{$}`）<br>公共前缀完全同形**且等长** → 落在同一节点、后注册覆盖前一个 → **报错**（重复注册 / 同形异名 / `/files/` 与 `/files/{p...}`） | ✅ |
+| 与 Go 的差异 | ✅ 已核实（`src/net/http/pattern.go` 的 `compareSegments` / `combineRelationships`）：Go 用**“谁更具体”**定序，于是 **放过** `/a/{x}`+`/a/{y...}`（`s2.multi` → `moreSpecific`）、**拒掉** `/a/{x}/c`+`/a/b/{y}`（`moreGeneral` ∧ `moreSpecific` → `overlaps`）。**我们恰好相反** —— 因为我们靠**字面量**定序，不靠“谁更具体” | ✅ |
+| 报错时机 | ❌ **不需要运行期报错**——用户判断：**类型信息在编译期，错误的路由表无法通过编译** | ✅ |
 
 > ⚠️ 最后一条的成立前提见 §F 风险 2。
 
@@ -761,9 +764,9 @@ auto server = pylai::Server::builder()
 | 建树方式 | **`constexpr` 构建器**：把各路由的**段序列**压成**字符级** radix；冲突检查在段级完成。方法论借自 `ctre`（用 `constexpr` 函数而非模板元编程） | ✅ |
 | 边的存储 | label 全部是某个 pattern 的 `raw` 上的**切片**（静态存储）→ **零拷贝**；分叉时只把切片一分为二，不拷贝字符 | ✅ |
 | 匹配器 | 按字符游标 `pos`前进；`chars` 边比字符、`param` 吃 `/` + 非空段、`catch_all` 吃到尾、`end_mark` 要求“恰好到尾”。出边按 rank 试，**失败就回溯**（如 `/files/static/x` 字面量边走到底不够 → 回退给 `/files/{path...}`） | ✅ |
-| 两侧如何对齐 | 段级提取出的**捕获顺序**就是字符级树的捕获槽位序（第 i 个命名占位符 ↔ `capture[i]`） | 🟡 |
-| 表的生命周期 | **运行期对象**，可**全量重建**；"修改路由"= 切换活跃集合后重建 | 🟡 |
-| pattern 存储 | 字面量有**静态存储期** → 树里直接存 `string_view`，**不需要 `deque` / arena、零分配** | 🟡 |
+| 两侧如何对齐 | 段级提取出的**捕获顺序**就是字符级树的捕获槽位序（第 i 个命名占位符 ↔ `capture[i]`） | ✅ |
+| 表的生命周期 | **运行期对象**，可**全量重建**；“修改路由”= 切换活跃集合后重建 | ✅ |
+| pattern 存储 | 字面量有**静态存储期** → 树里直接存 `string_view`，**不需要 `deque` / arena、零分配** | ✅ |
 | 擦除边界 | ✅ **每动词一处**：handler 的类型擦除发生在 **`Router` 内部**，`Server` 保持**非模板单类型**。<br>`VerbRoutes` = {`verb`, `matched`（纯判定）, `invoke`（命中就调用）} —— 内部是一棵该动词的 `constexpr` 树 + 一份**具体类型**的槽位 tuple。“匹配 + 调用”在同一个闭包里 ⇒ 捕获是 `invoke` 的参数，不再需要匹配两次 | ✅ |
 
 > **擦除点合并已落地（2026-10-14）**，两个连带结果：
@@ -784,7 +787,8 @@ auto server = pylai::Server::builder()
 >   **不是**第二个解析器 —— 它消费 `Pattern` 的 `kind`/`text`，一个字都不重新判类型）· `insert_pattern` = **跨所有 route** 的合并（产 label）。
 >   三者输入不同 ⇒ 分三份实现是**层级划分**，不是重复。真正多余的只有 `Segment::pos` / `raw_len`（只为"事后回折"存在）。
 > - **「先算后建」是权宜，不是规范**：`std::vector` 不能进 `constexpr` 变量 ⇒ 只能定容 `std::array` ⇒ 只能先数后建。
->   备选是"**数组长度进类型**"（实验：`.vscode/tmp/route-digest/pieces_by_type.cpp`）—— 省改 69~88% 编译期槽位，
+>   备选是“**数组长度进类型**”（评审时的一次性实验，写在 `.vscode/tmp/route-digest/pieces_by_type.cpp`，
+>   ⚠️ `.vscode/` 已 gitignore ⇒ **不在版本库**，要复核得自己重建）—— 省改 69~88% 编译期槽位，
 >   但每步 O(n) 拷贝（整体 O(n²)）、实例化数 = 段数，**运行期零差别**；且**段数本来就是 `count(raw, '/')`**，
 >   用 `constexpr` 朴素数一下即可，不需要元编程。结论：现状够用，不为此再动 `Pattern`。
 > - **维度确实是紧的**：`segment_count = count('/')`、`name_count = count('{')` 给两个数组，
@@ -797,7 +801,7 @@ auto server = pylai::Server::builder()
 | 参数写法 | ✅ **`req.param<T, "名字">()`**（`Request` 的成员函数，名字必写）—— 请求对象本身带捕获，不在形参表里摆载体（没有`Param` / `ParamCount` / `SlotOf` / 位置配对这套东西） | ✅ |
 | 校对时机 | `slot_of("名字")` 在**编译期**算出下标，名字不在 pattern 里就编不过（错误定位到写的那一行）<br>⚠️ **代价**：“pattern 里的名字没人读”不再算错 —— 读取发生在 handler 体内，编译期看不到 | ✅ |
 | 失败语义 | 🔍 **缺口**：整数转换失败静默给 0（`/users/abc → id == 0`）。备选：`std::expected` 形状的返回值（`has_value()` / `value()` / `error()`），由 handler 自检 | 🟡 |
-| 注入范围 | ✅ 现在只有 `Get<…>` 请求 + **响应类型**（`http::StringResponse&` / `EmptyResponse&` / `UnknownLengthResponse&`）两种；query / header 留待将来（**body 已就位**，见 §4.1.2） | 🟡 |
+| 注入范围 | ✅ 现在只有 `Get<…>` 请求 + **响应类型**（`route::StringResponse&` / `EmptyResponse&` / `UnknownLengthResponse&`）两种；query / header 留待将来（**body 已就位**，见 §4.1.2） | 🟡 |
 | handler 返回值 | **必须是 `asio::awaitable<void>`** | ✅ |
 
 #### E. 与主流实现的对照（本次调研来源）
@@ -834,9 +838,9 @@ auto server = pylai::Server::builder()
 - **OPTIONS** ✅：自动应答 `204` + `Allow`（按该路径已注册的动词，无体、不声称 `Content-Type`）；路径不存在 → 404。
 - **405 的 `Allow` 头** ✅：路径上有 `GET` 而无显式 `Head<>` 时，`Allow` **带上 HEAD**（RFC 9110 §9.3.2 的隐含搭档），位置紧跟 GET。
 - **重复注册同一 `(method, path)`** ✅：**编译期报错**（`validate_group`，错误里点名两条 pattern）。跨组不可能发生：一个 builder 只允许一次 `route_on`。
-- **重建 API 形态**：`build()` 怎么暴露、"活跃集合"怎么表达
-- 路由分组 / 前缀挂载 / 中间件
-- 路由表打印（调试用）
+- ❓ **重建 API 形态**：`build()` 怎么暴露、“活跃集合”怎么表达
+- 🔍 路由分组 / 前缀挂载 / 中间件（中间件另见 §1.5 留白清单）
+- 🔍 路由表打印（调试用）
 
 ---
 
@@ -844,5 +848,5 @@ auto server = pylai::Server::builder()
 
 - 负载来源：**外部工具为主**（`oha` / `wrk` / `hey`）+ **仓库内自带压测客户端**（需要精确控制 $\lambda$ 波形时用）。
   内置客户端建议**独立 target**，避免污染服务端指标。
-- 实验纪律（冻结参数、记录构建 id + 参数 + 指纹、按请求类别归因、丢弃过载数据）见 `AGENTS.md` §4。
-- 取源方式（选型 / 调研类问题必须上网核实）见 `AGENTS.md` §2 与全局 `preferences.md`。
+- 实验纪律（冻结参数、记录构建 id + 参数 + 指纹、按请求类别归因、丢弃过载数据）见 §4.1.4。
+- 取源方式（选型 / 调研类问题必须上网核实）是**用户级偏好**，不在本仓库里 —— 本仓库只承接它的后果：选型结论要标状态、疑点要真去核实。

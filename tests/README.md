@@ -7,14 +7,15 @@
 | 文件 | 作用 |
 |---|---|
 | `main.cpp` | 示例应用 `App`：声明 `/health`、`/users/{id}`、`/submit/{id}` 等路由，并启动服务器 |
-| `route_static.cpp` | 路由那套的**编译期用例**（`static_assert`）：pattern 语法 / 匹配语义 / 冲突规则 / DSL 与 `param()` |
+| `stream_concepts.cpp` | 编译期护栏：两侧通道必须满足 asio 的 `AsyncReadStream` / `AsyncWriteStream` —— 拿组合操作去消费它们，缺一项就编不过 |
 | `http_e2e.py` | 对运行中的服务器发原始 HTTP 请求，断言状态码与响应体 |
 | `run.sh` | 串起来：查端口 → 起服务器 → 跑 `http_e2e.py` → 收工 |
 
 产物可执行 target **`app`**（`build-dev_llvm/tests/Debug/app`）。
 
-> `route_static.cpp` 不参与运行 —— `static_assert` 在**编译期**就求值完了，**构建过 = 用例过**。
-> 它只用 `import pylai;` 的**导出面**（消费方视角），顺带验收“该导出的都导出了”。
+> 路由那套的**编译期用例**（99 条 `static_assert`）已搬进 **`server/route.checks.cpp`** ——
+> 它是 `pylai` 的**实现单元**（`module pylai;`），因为那些断言要看树 / 建树器 / 匹配器这些**不导出**的内部件。
+> 代价是少了“顺带验收导出面”的护栏，补偿是 `main.cpp` 这个真 app 仍走 `import pylai;` 的公开面 + e2e 全程跑。
 > ⚠️ “必须编不过”的失败路径不在这里（编译期拦不住的、或拦下的错误文案）→ 人工探针，见 `docs/http-server-plan.md` §11.2。
 
 ## 为什么应用不在 `server/`

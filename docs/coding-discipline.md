@@ -1,7 +1,7 @@
 # 编码纪律
 
 > **这是写代码前要过一遍的规矩。** 不是现状说明，也不是历史记录 ——
-> 想知道现状怎么设计，看 `http-server-plan.md` / `routing.md`；想知道为什么变成这样，看 `changelog.md`；想知道怎么干活（证据、工具、提交），看 `AGENTS.md`。
+> 想知道现状怎么设计，看 `http-server-plan.md`；想知道为什么变成这样，看 `changelog.md`；想知道怎么干活（证据、工具、提交），看 `AGENTS.md`。
 >
 > 本文与**具体代码解耦**：它约束“怎么写”，不描述“已经写了什么”。每条末尾的自检问句就是判据。
 
@@ -113,7 +113,7 @@
 |---|---|
 | **写代码时的规矩** | 本文 |
 | 怎么干活（证据、工具、提交） | `AGENTS.md` |
-| 接口怎么用 | `routing.md`（使用者手册） |
+| 接口怎么用 | `server/README.md`（使用者手册） |
 | 现状为什么这么设计 | `http-server-plan.md` |
 | 怎么走到现状的、推翻过什么 | `changelog.md` |
 | 第三方机制与坑 | `modules.md` · `asio-notes.md` · `vcpkg.md` |

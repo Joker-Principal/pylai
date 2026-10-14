@@ -1,6 +1,6 @@
 # 变更史 —— 历史论证（新在上）
 
-> **这里是"账本"，不是"说明书"。** 现状设计看 `http-server-plan.md` / `routing.md` / `modules.md` 等专题文档；
+> **这里是"账本"，不是"说明书"。** 现状设计看 `http-server-plan.md` / `modules.md` 等专题文档；怎么用看 `server/README.md`；
 > 本文件只记**怎么走到现状的** —— 当时怎么想、谁推翻了什么、改成了什么、怎么复核。
 > 更早的历史看 `git log`。
 
@@ -19,6 +19,18 @@
 ---
 
 ## 阶段 1 · 框架形态定形
+
+- **2026-10-14 · S1-R14 · 全仓文档复查：读者分流 · 路由并入使用手册 · 证据纪律改“符号名”** ✅ —— 用户：“把所有文档都重新检查和整理一遍吧，遇到问题用选项卡告诉我”，四个维度：重复内容 · 章节与交叉引用 · 状态标记 · 示例与 API 一致性（`changelog.md` 作为历史账本除外）。
+  **读者分流**：`AGENTS.md` §0 给出三类读者入口（只想用它 / 读代码改框架 / 只看接口边界）；§1 不再抄目录地图（以根 `README.md` 为准，免得两处各改各的）。
+  **路由并入使用手册**：`docs/routing.md` 的内容并进 `server/README.md`（接入 · 最小可跑 · DSL 全表 · 请求与响应 · 协议层应答 · 观测挂点）后删除 —— 路由是 server 的一部分，不该有两份。
+  **交叉引用修正**：plan §2 末尾的「§11 研究方法」→ §12；§6 引 `AGENTS.md` §1、§7.3 与 §12 引 `AGENTS.md` §4 / §5、`docs/vcpkg.md` 引“已写进 `AGENTS.md` §2” —— 都因 `AGENTS.md` 重组而失效（vcpkg 那条本来就没写过）。一律改成真正写着那段话的地方（根 `README.md` 目录地图 / plan §4.1.4），vcpkg 那句删掉。
+  **状态标记**：Stage 1 的「观测挂点」🟡 → ✅（空壳已落地）；plan §11.2 的 A / B / C 三表里**已实现**却标 🟡 的 14 项全改 ✅。用户定口径：“**✅ + 注明可推翻**”，已写进 `AGENTS.md` §2 —— 状态跟事实走、不跟情绪走，别用 🟡 含糊带过（🟡 是给“还没做”的）。
+  **⚠️ 证据纪律修订（用户定）**：本仓库代码的引用**一律给符号名，不写行号**。理由是实测：plan 里 6 处行号**全部漂了**（`http.cpp:144` → 150、`http.cpp:137` → 143~145、`session.cpp:256` → 250、`session.cpp:286~291` → 279~283…），而 `changelog` 里上一次“已逐条重新核对”之后又漂了一遍 —— 重构总往文件前部插代码，行号必然过期。`AGENTS.md` §2 改为“给**符号名**（`文件` + 函数 / 类型名）”，并写明两个例外：`changelog.md` 里的历史行号保持当时的样貌、指向 asio / llhttp **上游**的行号不受影响（绑的是那个版本的源码）。
+  **事实修正**：`asio-notes.md` §0 的版本改成以 vcpkg `status` 实测为准（boost 1.92.0 / openssl 3.6.5，此前写的是 1.90.0 / 3.6.2）；§6 与 §11.2 引的 `.vscode/tmp/...` 探针都不在版本库（在 gitignore 里）⇒ 加注“要复核请按条件重建”。
+  **线程模型降级（用户定）**：`asio-notes.md` §7 原来写“每线程一个 `io_context` + 各自 acceptor（SO_REUSEPORT），**对齐 hical**” —— 用户：“**我们不打算对齐 hical，那是过时说法**，目前的目标模型还需要和线程池部分一起设计” ⇒ 删掉 hical 与 SO_REUSEPORT，降为 ❓ 待定（那张“每线程一套 Router”的表保留为**候选**）；plan §1.4 里“不做多机”顺带把单机分片手段也否掉的措辞一并修正。
+  **示例与 API 一致性**：用 clice `query --method symbolSearch --symbol 'Builder::*'` 核对使用手册里的方法名（`bind` / `io_threads` / `idle_timeout` / `write_timeout` / `max_requests_per_connection` / `max_body_bytes` / `route_on` / `build`），补上漏写的 `max_requests_per_connection`；`server/README.md` 里编译期用例的位置纠正为 `server/route.checks.cpp` 的 `selftest` 命名空间（不是 `route.cppm`）、其中 clice 示例的 `--query` / `--name` 换成现行 CLI 的 `--symbol`；“当前状态”从“Stage 0 未完成”改成与 plan §9 一致的“Stage 1 进行中”。
+  杂项：`standalone/asio.cppm` 删掉一段 `make_error_code` 的注释（用户：“它是杂项，跟着提交就行”）。
+  验证：构建退出码 0；e2e **30 条一字未改、全过**（纯文档批次，行为零变化）。
 
 - **2026-10-14 · S1-R13 · 挂点空壳落地：观测槽 / Observer 钩子 / 类别指纹** ✅ —— Stage 1 的最后一件（设计在 plan §4.1.4）。
   落地产出：① `route::Request<v,p>::fingerprint()` —— `method + pattern` 的 FNV-1a（**稳定**标识，不吃编译器类型 hash）；② `http::Observation` 每请求槽，`Context` 以 `[[no_unique_address]]` 持一份（现在只有一个 `route_fingerprint`，其余字段留给 Stage 3）；

@@ -35,4 +35,4 @@ cmake --build --preset debug_llvm
 
 也可以用 CMake Tools 触发配置 / 构建（状态栏按钮，或命令 `cmake.configure` / `cmake.build`）。
 但**命令本身不返回可读输出**：要看编译错误请走 **Problems 面板诊断**，要原始输出请走终端。
-理由与完整的"想做什么 → 走哪条路"对照表见 `AGENTS.md` §4。
+理由与完整的"想做什么 → 走哪条路"对照表见 `AGENTS.md` §3。

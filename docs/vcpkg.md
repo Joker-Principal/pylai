@@ -17,7 +17,7 @@ ls <vcpkg 根>/ports | grep -i <关键词>
 cat <vcpkg 根>/ports/<name>/vcpkg.json
 ```
 
-这是**最快最准**的途径（比搜网页可靠），已写进 `AGENTS.md` §2。
+这是**最快最准**的途径（比搜网页可靠），也是本仓库查版本的唯一口径 —— **以 `status` / `ports/*/vcpkg.json` 的实测为准**，不靠记忆。
 
 ## overlay port 机制
 

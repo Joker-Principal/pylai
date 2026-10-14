@@ -361,10 +361,6 @@ export namespace asio {
         using asio::error::netdb_errors;
         using asio::error::addrinfo_errors;
         using asio::error::misc_errors;
-        // 普通 completion handler 会实例化 asio 内部 op（如 io_uring_socket_recv_op），
-        // 那些模板体里把 asio::error::eof 之类的枚举赋给 std::error_code —— 依赖 ADL 找到
-        // make_error_code 重载。不导出它们，TU 侧实例化就会报 "no matching function
-        // for call to 'make_error_code'"。
         using asio::error::make_error_code;
     }
 
