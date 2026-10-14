@@ -11,7 +11,7 @@
 ## 1. 怎么声明路由
 
 动词与路径写在**第一个形参**上（`Get<P>` 既是路由声明、也是**这条路由的请求类型**）；
-handler 返回 `asio::awaitable<void>`，响应按**引用**传进来由它填；整包一次注册：
+handler 返回 `asio::awaitable<void>`，响应按**引用**传进来：**链式填状态，链尾 `flush()` 才出网**；整包一次注册：
 
 ```cpp
 using namespace pylai::route;
@@ -26,17 +26,18 @@ struct App
 
 asio::awaitable<void> App::user(Get<"/users/{id}"> req, pylai::http::StringResponse& res)
 {
-	res.body = "user id=" + std::to_string(req.param<int, "id">()) + "\n";
-	co_return;
+	co_await res.body("user id=" + std::to_string(req.param<int, "id">()) + "\n").flush();
 }
 
 // 长度未知：边跑边推（响应侧 chunked），结束时补 trailer
 asio::awaitable<void> App::sse(Get<"/sse">, pylai::http::UnknownLengthResponse& res)
 {
-	res.declare_trailer("X-Chunks");       // 预告：头里会写 `Trailer: X-Chunks`
-	co_await res.write("chunk-a\n");
-	co_await res.write("chunk-b\n");
-	co_await res.finish({{{"X-Chunks", "2"}}});
+	// 预告 `Trailer: X-Chunks`（必须在发头之前）→ 头 + 第一块由链尾的 flush 一起发出去
+	if(co_await res.trailer("X-Chunks").body("chunk-a\n").flush()) co_return;
+	if(co_await res.body("chunk-b\n").flush()) co_return;
+
+	const std::array trailers{pylai::http::Header{"X-Chunks", "2"}};
+	co_await res.finish(trailers);
 }
 
 App app;   // 必须比 server 活得久：路由里存的是 &app
@@ -90,29 +91,38 @@ auto server = pylai::Server::builder()
 
 | 类型 | 体在哪 | 定界 | 典型用途 |
 |---|---|---|---|
-| `http::StringResponse` | 内存里的 `std::string`（`res.body`） | `Content-Length` | 绝大多数接口 |
-| `http::EmptyResponse` | 无 | 204 / 304 / 1xx：**不发** `Content-Length`；其它状态码发 `Content-Length: 0` | OPTIONS 204、304 |
-| `http::UnknownLengthResponse` | handler 边跑边推（`co_await res.write(块)`） | **响应侧 chunked** | SSE / 大响应流 |
+| `http::StringResponse` | 内存里的 `std::string`（`body(块)` 追加） | `Content-Length` | 绝大多数接口 |
+| `http::EmptyResponse` | 无（**没有** `body()`） | 204 / 304 / 1xx：**不发** `Content-Length`；其它状态码发 `Content-Length: 0` | OPTIONS 204、304 |
+| `http::UnknownLengthResponse` | handler 边跑边推（`body(块)` + `flush()`） | **响应侧 chunked** | SSE / 大响应流 |
 
-公共字段：`status`（默认 200 / 204）· `content_type` · `headers`（`{名字, 值}` 列表）。
-响应**由响应类型自己发**：框架只把写通道（`http::ResponseWriter`）交给它，两个方向的字节都从 `Session` 过 ⇒ 写超时绕不过。
+公共部分：`status(int)`（默认 200；`EmptyResponse` 默认 204）· `content_type(名字)` · `header(名字, 值)` · `trailer(名字)`（预告）。
+它们**只改状态**（链式，返回具体响应类型，可以混着链）；**出网只有一个动作** —— `co_await res.flush()`。
+`flush()` 返回 `std::error_code`（空 = 成功；否则 `http::WriteErrc::closed` / `timed_out`）。
 
 ```cpp
-res.status = 201;
-res.content_type = "application/json";
-res.headers.push_back({"X-Trace", "abc"});
-res.body = R"({"ok":true})";
+co_await res.status(201).content_type("application/json").header("X-Trace", "abc").body(R"({"ok":true})").flush();
 ```
 
-**推式（`UnknownLengthResponse`）**：
-- 第一次 `write()` 时把响应头发出去（那时才采样 `Connection`）；
-- `co_await res.finish(trailers)` = 终止块 + trailer；**不调也行** —— 框架会在 handler 返回后补收尾。
-- `res.declare_trailer("X-…")` 会在头里预告 `Trailer: X-…`（RFC 9110 §6.6.2，SHOULD）。
+| 动作 | 含义 |
+|---|---|
+| `body(块)` | **只往内存追加**，不碰 socket |
+| `co_await res.flush()` | 把此刻攒着的东西发出去：头没发就先发头，然后把体发出去（推式就是发一个块）。幂等 |
+| `co_await res.finish(trailers)` | 收尾：flush + 末块 + trailer。handler 不调的话**框架在它返回后兜底调** |
 
+**推式（`UnknownLengthResponse`）**：`flush()` 推一块 —— **什么时候推由 handler 定**（这是它存在的理由）；
+`finish(trailers)` 发终止块 + trailer。
+`EmptyResponse` **没有** `body(…)`：无体响应不接受体，编译期就拦下。
+
+> ⚠️ **顺序错会抛 `std::logic_error`**：头一发出去，`status` / `content_type` / `header` / `trailer` 就不能再改（字节已经写出去了）；
+> 定长响应（`StringResponse`）在 flush 之后也不能再 `body()`（长度已经写死在头里）。
+>
+> ⚠️ **`co_await res` 这种写法不存在** —— asio 的 promise 有 `await_transform`，它**优先于** `operator co_await`，
+> 所以出网入口只能是 `co_await res.flush()` / `co_await res.finish()`。
+>
 > ⚠️ **trailer 只在 chunked 下存在**（`Content-Length` 定界的响应根本没有它）。且字段得是**其定义允许出现在 trailer** 的
 > （如 `ETag`、`Accept-Ranges`、`Authentication-Info`）；中间设备“往往直接丢掉”，所以别放用户必需的信息（RFC 9110 §6.5.1）。
 >
-> ⚠️ **HEAD 的推式响应**：一个块也不推（`write()` 直接返回），头照发（含 `Transfer-Encoding: chunked`）。
+> ⚠️ **HEAD**：头照发（`Content-Length` 按 GET 的体算），正文一个字节也不发。
 
 ---
 
@@ -279,5 +289,5 @@ chars(0)  →  param(1)  →  catch_all(2)  →  end_mark(3)
 - **路径上有 `GET` 却没有显式 `Head<>` 时补一个 `HEAD`**，紧跟 GET 之后 —— RFC 9110 §9.3.2 把 HEAD 当作 GET 的隐含搭档。
   所以只写一条 `Get<"/health">`，`Allow` 就是 `GET, HEAD`。
 
-> ⚠️ “不发正文”由**响应类型**在收尾时按 `ResponseWriter::head_only()` 抑制（`session.cpp` 传 `req.method == "HEAD"`）——
+> ⚠️ “不发正文”由**响应类型**自己按 `ResponseWriter::head_only()` 抑制（值由 `session.cpp` 按 `req.method == "HEAD"` 给）——
 > 于是**显式 `Head<>` 的 handler 就算填了 `response.body` 也不会发出去**（但它的长度会出现在 `Content-Length` 里）。

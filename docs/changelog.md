@@ -20,6 +20,29 @@
 
 ## 阶段 1 · 框架形态定形
 
+- **2026-10-14 · S1-R2 · 响应改成「链式填状态 + flush 出网」** ✅ —— 用户要求“各种 Response 都加 `write(头)` / `write(体)`，
+  这才是 handler 驱动的读写”，并给出形态：链式 setter 写状态、`operator co_await` 做 flush、顺序错抛异常。
+  我问了三个细节，用户定：**自定义 `error_category`**（不是 `bool`）· **显式 `finish()` + 框架兜底** · **字段私有化只走链式**。
+  落地产出：`http::WriteErrc`（`closed` / `timed_out`）+ `write_category()`；`ResponseWriter::write` 改返回 `std::error_code`；
+  `ResponseBase<Derived>`（CRTP：链式 setter 返回**具体类型** ⇒ 可混着链）+ `BodyResponse<Derived, streaming>`；
+  三种响应各自 `flush()` / `finish()`，**状态机** `config → head_sent → finished`（头发出后再改 status/header ⇒ `throw_out_of_order`
+  抛 `std::logic_error`）；`route` 在 handler 返回后兜底 `co_await response.finish()`（幂等）。
+  ⚠️ **修订（我的方案被标准否掉）**：`co_await res` 这种字面语法**做不出来** —— asio 的 promise 有成员 `await_transform`，
+  标准规定它**优先于** `operator co_await`（promise 只接受 `awaitable<T,Executor>` 与满足 `is_async_operation` 的对象，
+  `asio/impl/awaitable.hpp:186`），所以 `operator co_await` 根本没机会参与（编译报错：11 errors，全部指向 `await_transform` 候选）。
+  要真让 `co_await res` 生效，得把响应做成 asio 的 **async operation 对象**（`operator()(token)` → `async_initiate` +
+  `ResponseWriter::get_executor()` + `co_spawn` 启动 flush，`asio/async_result.hpp:861` / `:985`）—— 用户拍板**不做**：
+  代价是每次 flush 多一份协程帧分配、且与等待方脱离父子关系（异常/取消传播变弱）。**最终形态：链尾 `co_await res.flush()`。**
+  ⚠️ **修订**：接口名换了一套 —— `declare_trailer` → `trailer(name)`；推式的 `write(块)` → `body(块)`（**只攒内存，不碰 socket**）
+  + `flush()`（出网）；`send()` 取消，统一成 `finish()`（幂等 + 框架兜底）。`EmptyResponse` 干脆**没有** `body()`：
+  能在类型层面拦的错就不要留到运行期抛。
+  ⚠️ **修订**：“惰性发头”（第一次 `write()` 顺带把头发出去）这个隐藏时机没了 —— 头发不发完全由 handler 的 `flush()` 决定，
+  于是“**先发头、再慢慢读请求体、再推体**”这才表达得出来（`Expect: 100-continue` 的口子由此打开，自动回 100 未做）。
+  `Connection` 的采样/冻结仍在**首次出网那一刻**（`session.cpp` 的 `write` 首次调用），语义比之前更清楚：那一刻的 `body_finished` 说了算。
+  （工程杂项同一轮：建了仓库根 `.venv`（Python 3.14.8）给测试脚本装库用，已进 `.gitignore`。）
+  验收：构建退出码 0；e2e **29 条一字未改、全过**（`tests/http_e2e.py` 本次**零改动** —— 新接口行为等价）；
+  `/stream` 用例覆盖“两次 `flush()` 分段推 + `finish(trailers)`”的全过程。复核：`cmake --build --preset debug_llvm` + `./tests/run.sh`。
+
 - **2026-10-14 · S1-R1 · 响应类型三种落地：响应自己发，框架只给写通道** ✅ —— 起点是用户问“发体途中还能发头吧？得讨论一下”。
   查 RFC 后确认：**能，但只有一处** —— 响应侧 chunked 的 `trailer-section`（RFC 9112 §7.1.2 `chunked-body = *chunk last-chunk trailer-section CRLF`），
   且受三重约束：必须 chunked 定界（`Content-Length` 定界的响应根本没有 trailer）；字段得是**其定义允许出现在 trailer** 的

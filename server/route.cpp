@@ -20,8 +20,7 @@ namespace {
 [[nodiscard]] http::StringResponse text_response(int status, std::string body)
 {
 	http::StringResponse response;
-	response.status = status;
-	response.body = std::move(body);
+	response.status(status).body(body);
 	return response;
 }
 
@@ -95,22 +94,25 @@ asio::awaitable<void> Router::dispatch(const http::Request& request, http::Respo
 	const std::string allow = allowed_methods(methods, request.path);
 	if(allow.empty())
 	{
-		co_await text_response(404, "404 Not Found\n").send(writer);
+		auto response = text_response(404, "404 Not Found\n");
+		response.attach(writer);
+		co_await response.finish();
 		co_return;
 	}
 
 	if(request.method == "OPTIONS")
 	{
 		http::EmptyResponse response;
-		response.status = 204;
-		response.headers.push_back({"Allow", allow});
-		co_await response.send(writer);
+		response.attach(writer);
+		response.header("Allow", allow);
+		co_await response.finish();
 		co_return;
 	}
 
 	auto response = text_response(405, "405 Method Not Allowed\n");
-	response.headers.push_back({"Allow", allow});
-	co_await response.send(writer);
+	response.header("Allow", allow);
+	response.attach(writer);
+	co_await response.finish();
 }
 
 } // namespace pylai::route

@@ -1015,20 +1015,17 @@ template <class C, class F, std::size_t... indices>
 		if(match(tree, request.path, captures) == k_no_route)
 		{
 			http::StringResponse fallback;
-			fallback.status = 500;
-			fallback.body = "路由派发：组命中但单条 pattern 未命中\n";
-			co_await fallback.send(writer);
+			fallback.attach(writer);
+			fallback.status(500).body("路由派发：组命中但单条 pattern 未命中\n");
+			co_await fallback.finish();
 			co_return;
 		}
 
 		using Response = std::remove_cvref_t<typename Params::template At<response_slot>>;
 		Response response;
-		if constexpr(requires { response.attach(writer); })
-		{
-			response.attach(writer); // 推式响应：框架把写通道注进去，handler 才能在运行期间推块
-		}
+		response.attach(writer); // 框架只逆写通道，之后什么时候写由 handler / 响应类型定
 		co_await (self->*pmf)(make_arg<indices, F>(request, response, captures)...);
-		co_await response.send(writer);
+		co_await response.finish(); // 兜底：handler 没显式收尾时由框架收（幂等）
 	};
 }
 

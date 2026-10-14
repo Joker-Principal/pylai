@@ -379,78 +379,114 @@ std::string last_chunk_bytes(std::span<const Header> trailers)
 	return out;
 }
 
-asio::awaitable<bool> StringResponse::send(ResponseWriter& out) const
+namespace {
+
+class WriteCategoryImpl : public std::error_category
 {
-	if(!co_await out.write(
-		   head_bytes(status, content_type, headers, std::uint64_t{body.size()}, false, out.keep_alive(), {})
-	   ))
+public:
+	[[nodiscard]] const char* name() const noexcept override { return "pylai.http.write"; }
+
+	[[nodiscard]] std::string message(int code) const override
 	{
-		co_return false;
+		switch(static_cast<WriteErrc>(code))
+		{
+			case WriteErrc::closed: return "connection closed";
+			case WriteErrc::timed_out: return "write timed out";
+		}
+		return "unknown write error";
 	}
-	if(out.head_only() || body.empty()) co_return true;
-	co_return co_await out.write(body);
+};
+
+} // namespace
+
+const std::error_category& write_category() noexcept
+{
+	static const WriteCategoryImpl instance;
+	return instance;
 }
 
-asio::awaitable<bool> EmptyResponse::send(ResponseWriter& out) const
+std::error_code make_error_code(WriteErrc value) noexcept
 {
+	return {static_cast<int>(value), write_category()};
+}
+
+void throw_out_of_order(std::string_view action)
+{
+	throw std::logic_error{
+		"响应写入顺序错误：`" + std::string{action} + "` 不能在响应头发出（或收尾）之后再调用"
+	};
+}
+
+asio::awaitable<std::error_code> StringResponse::flush()
+{
+	if(stage_ == Stage::finished) co_return std::error_code{};
+	require_writer();
+
+	if(stage_ == Stage::config)
+	{
+		const auto ec = co_await send_head(std::uint64_t{pending_.size()}, false);
+		if(ec) co_return ec;
+	}
+
+	// HEAD 照发头（`Content-Length` 按 GET 的体算），正文由这里抑制（RFC 9110 §9.3.2）。
+	if(out_->head_only() || pending_.empty())
+	{
+		stage_ = Stage::finished;
+		co_return std::error_code{};
+	}
+
+	const auto ec = co_await out_->write(pending_);
+	if(!ec) stage_ = Stage::finished;
+	co_return ec;
+}
+
+asio::awaitable<std::error_code> EmptyResponse::flush()
+{
+	if(stage_ == Stage::finished) co_return std::error_code{};
+
 	// 204 / 304 / 1xx 是“无内容”，不得带 Content-Length（RFC 9110 §8.6）；
 	// 其它状态码只是“零长度内容”，必须写 Content-Length: 0 才能定界。
-	const bool no_content = status == 204 || status == 304 || (status >= 100 && status < 200);
-	const std::optional<std::uint64_t> length = no_content ? std::nullopt : std::optional<std::uint64_t>{0};
-
-	co_return co_await out.write(head_bytes(status, {}, headers, length, false, out.keep_alive(), {}));
+	const bool no_content = status_ == 204 || status_ == 304 || (status_ >= 100 && status_ < 200);
+	const auto ec = co_await send_head(no_content ? std::nullopt : std::optional<std::uint64_t>{0}, false);
+	if(!ec) stage_ = Stage::finished;
+	co_return ec;
 }
 
-void UnknownLengthResponse::declare_trailer(std::string_view name) { trailer_names.emplace_back(name); }
-
-asio::awaitable<bool> UnknownLengthResponse::write(std::string_view data)
+asio::awaitable<std::error_code> UnknownLengthResponse::flush()
 {
-	if(out == nullptr) co_return false;
+	if(stage_ == Stage::finished) co_return std::error_code{};
+	require_writer();
 
-	if(!started)
+	if(stage_ == Stage::config)
 	{
-		started = true;
-		std::vector<Header> hint;
-		hint.reserve(trailer_names.size());
-		for(const std::string& name : trailer_names) hint.push_back({name, {}});
-		if(!co_await out->write(
-			   head_bytes(status, content_type, headers, std::nullopt, true, out->keep_alive(), hint)
-		   ))
-		{
-			co_return false;
-		}
+		const auto ec = co_await send_head(std::nullopt, true);
+		if(ec) co_return ec;
 	}
 
-	// 空载荷不产生块："0\r\n\r\n" 是终止块，不是“空块”。
-	if(out->head_only() || data.empty()) co_return true;
-	co_return co_await out->write(chunk_bytes(data));
+	// 空载荷不产生块："0\r\n\r\n" 是终止块，不是“空块”—— 那是 finish() 的事。
+	if(pending_.empty() || out_->head_only()) co_return std::error_code{};
+
+	const auto ec = co_await out_->write(chunk_bytes(pending_));
+	pending_.clear();
+	co_return ec;
 }
 
-asio::awaitable<bool> UnknownLengthResponse::finish(std::span<const Header> trailers)
+asio::awaitable<std::error_code> UnknownLengthResponse::finish(std::span<const Header> trailers)
 {
-	if(finished) co_return true;
-	finished = true;
-	if(out == nullptr) co_return false;
+	if(stage_ == Stage::finished) co_return std::error_code{};
 
-	if(!started)
+	const auto flushed = co_await flush();
+	if(flushed) co_return flushed;
+
+	if(out_->head_only()) // HEAD：不应有体，也不发终止块
 	{
-		started = true;
-		if(!co_await out->write(
-			   head_bytes(status, content_type, headers, std::nullopt, true, out->keep_alive(), trailers)
-		   ))
-		{
-			co_return false;
-		}
+		stage_ = Stage::finished;
+		co_return std::error_code{};
 	}
 
-	if(out->head_only()) co_return true; // HEAD：不应有体，也不发终止块
-	co_return co_await out->write(last_chunk_bytes(trailers));
-}
-
-asio::awaitable<bool> UnknownLengthResponse::send(ResponseWriter& writer)
-{
-	out = &writer; // 一个块都没推过时，得靠它才能把头（和 trailer）发出去
-	co_return co_await finish();
+	const auto ec = co_await out_->write(last_chunk_bytes(trailers));
+	if(!ec) stage_ = Stage::finished;
+	co_return ec;
 }
 
 } // namespace pylai::http

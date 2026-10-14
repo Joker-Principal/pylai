@@ -10,7 +10,7 @@ import pylai;
 namespace {
 
 // 声明写法：动词 + 路径住在**第一个形参**（`Get<P>` 既是路由声明、也是请求类型），
-// 响应按**引用**传进来由 handler 填，handler 返回 `asio::awaitable<void>`。
+// 响应按**引用**传进来：链式填状态，`co_await res` 才把它发出去（写由 handler 驱动）。
 // 注册入口是 `Builder::route_on(&app, &App::...)`，整包一次挂上去。
 using namespace pylai::route;
 
@@ -39,52 +39,44 @@ struct App
 
 asio::awaitable<void> App::health(Get<"/health">, pylai::http::StringResponse& res)
 {
-	res.body = "ok\n";
-	co_return;
+	co_await res.body("ok\n").flush(); // 链的最后一环 = flush：写到这一刻才碰 socket
 }
 
 asio::awaitable<void> App::user(Get<"/users/{id}"> req, pylai::http::StringResponse& res)
 {
-	res.body = "user id=" + std::to_string(req.param<int, "id">()) + "\n";
-	co_return;
+	co_await res.body("user id=" + std::to_string(req.param<int, "id">()) + "\n").flush();
 }
 
 asio::awaitable<void> App::submit(Post<"/submit/{id}"> req, pylai::http::StringResponse& res)
 {
-	res.body = "submitted id=" + std::to_string(req.param<int, "id">()) + "\n";
-	co_return;
+	co_await res.body("submitted id=" + std::to_string(req.param<int, "id">()) + "\n").flush();
 }
 
 asio::awaitable<void> App::list_items(Get<"/items">, pylai::http::StringResponse& res)
 {
-	res.body = "items\n";
-	co_return;
+	co_await res.body("items\n").flush();
 }
 
 asio::awaitable<void> App::create_item(Post<"/items">, pylai::http::StringResponse& res)
 {
-	res.body = "created\n";
-	co_return;
+	co_await res.body("created\n").flush();
 }
 
 asio::awaitable<void> App::both(Get<"/both">, pylai::http::StringResponse& res)
 {
-	res.body = "get\n";
-	co_return;
+	co_await res.body("get\n").flush();
 }
 
 asio::awaitable<void> App::both_head(Head<"/both">, pylai::http::StringResponse& res)
 {
-	res.body = "explicit-head\n"; // 长度与 GET 故意不同 → e2e 据此看出是谁应答的
-	co_return;
+	co_await res.body("explicit-head\n").flush(); // 长度与 GET 故意不同 → e2e 据此看出是谁应答的
 }
 
 // 请求体：框架读到 headers 就交棒，体由 handler 自己拉（`co_await req.body()`，受 max_body_bytes 约束）。
 asio::awaitable<void> App::echo_body(Post<"/body"> req, pylai::http::StringResponse& res)
 {
 	const std::string body = co_await req.body();
-	res.body = "body=" + body;
-	co_return;
+	co_await res.body("body=" + body).flush();
 }
 
 // 只读一小段体就返回 —— e2e 用它验“未读体 ⇒ Connection: close”。
@@ -92,18 +84,18 @@ asio::awaitable<void> App::peek_body(Post<"/peek"> req, pylai::http::StringRespo
 {
 	std::array<char, 4> head{};
 	const std::size_t n = co_await req.read_some(head);
-	res.body = "peek=" + std::string{head.data(), n};
-	co_return;
+	co_await res.body("peek=" + std::string{head.data(), n}).flush();
 }
 
+// 长度未知：一块一块推 —— 每次 `flush()` 才把攒下的字节发出去（写由 handler 驱动）。
 asio::awaitable<void> App::stream(Get<"/stream">, pylai::http::UnknownLengthResponse& res)
 {
-	res.declare_trailer("X-Chunks"); // 预告：Trailer: X-Chunks
+	// 预告 `Trailer: X-Chunks`（必须在发头之前）→ 头 + 第一块由链尾的 flush 一起发出去
+	if(co_await res.trailer("X-Chunks").body("chunk-a\n").flush()) co_return;
+	if(co_await res.body("chunk-b\n").flush()) co_return; // 第二块
 
-	co_await res.write("chunk-a\n");
-	co_await res.write("chunk-b\n");
 	const std::array trailers{pylai::http::Header{"X-Chunks", "2"}};
-	co_await res.finish(trailers);
+	co_await res.finish(trailers); // 末块 + trailer
 }
 
 } // namespace

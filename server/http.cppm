@@ -9,6 +9,8 @@ module;
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
+#include <type_traits>
 #include <vector>
 
 export module pylai:http;
@@ -83,6 +85,17 @@ struct Request
 	asio::awaitable<std::size_t> read_some(std::span<char> out) const;
 };
 
+// 写响应时可能出的错：`std::error_code` + 自定义 category（空 error_code = 成功）。
+// 就两类 —— 连接没了、写超时；两者之后这个响应都不必再写。
+enum class WriteErrc
+{
+	closed = 1, // 对端已断 / 写失败
+	timed_out,  // 写超时
+};
+
+[[nodiscard]] const std::error_category& write_category() noexcept;
+[[nodiscard]] std::error_code make_error_code(WriteErrc value) noexcept;
+
 // 响应侧的写通道：擦除边界上**唯一能碰 socket** 的东西（实现在连接层 `Session`）。
 // 为何是抽象基类：`route::Handler` 已经类型擦除，通道必须**非模板**（同 `BodyReader` 的理由）。
 class ResponseWriter
@@ -93,8 +106,8 @@ public:
 	ResponseWriter(const ResponseWriter&) = delete;
 	ResponseWriter& operator=(const ResponseWriter&) = delete;
 
-	// 写一段线上字节（带超时）。false = 连接已经没了（写超时 / 对端断）⇒ 调用方应收工。
-	virtual asio::awaitable<bool> write(std::string_view bytes) = 0;
+	// 写一段线上字节（带超时）。返回空 error_code = 成功；否则是 `WriteErrc` ⇒ 这个响应已经没救了。
+	virtual asio::awaitable<std::error_code> write(std::string_view bytes) = 0;
 
 	// ⚠️这两项要在**发响应头之前**读，且只反映“此刻”：
 	// keep_alive —— 头一写出去就冻结（未读的请求体 ⇒ 只能 close）；head_only —— HEAD 抑制正文。
@@ -117,61 +130,179 @@ std::string head_bytes(
 std::string chunk_bytes(std::string_view data);
 std::string last_chunk_bytes(std::span<const Header> trailers);
 
-// 一个有体的响应：头部 + 内存里的体，`Content-Length` 定界。
-struct StringResponse
+// 响应已经写到哪一步 —— 状态机的依据。顺序错的动作 ⇒ 抛 `std::logic_error`（消息里点名动作）。
+enum class Stage : std::uint8_t
 {
-	int status{200};
-	std::string content_type{"text/plain; charset=utf-8"};
-	std::vector<Header> headers;
-	std::string body;
-
-	// 发给通道。false = 连接没了（不必再写）。HEAD 时正文不发，`Content-Length` 照旧（RFC 9110 §9.3.2）。
-	asio::awaitable<bool> send(ResponseWriter& out) const;
+	config,	  // 头还没发出去：status / content_type / header / trailer 预告 都能改
+	head_sent, // 头已发：上面那些都改不动了（写进线上的字节收不回来）
+	finished,  // 已收尾：再写什么都不理（幂等）
 };
 
-// 无体响应。⚠️204 / 304 / 1xx **不得**带 `Content-Length`（RFC 9110 §8.6）；
-// 其它状态码用 `EmptyResponse` 就是“零长度内容”，要写 `Content-Length: 0` 才能定界。
-struct EmptyResponse
-{
-	int status{204};
-	std::vector<Header> headers;
+// 顺序错误（头已发还改 status 之类）。定义在 http.cpp。
+[[noreturn]] void throw_out_of_order(std::string_view action);
 
-	asio::awaitable<bool> send(ResponseWriter& out) const;
+// 三种响应的公共面：状态机 + 链式 setter + 发头。
+// 链式 setter 返回**具体类型**（CRTP）⇒ `res.status(201).header("X-A", "1")` 可以混着链。
+template <typename Derived>
+class ResponseBase
+{
+public:
+	ResponseBase(const ResponseBase&) = delete;
+	ResponseBase& operator=(const ResponseBase&) = delete;
+	ResponseBase(ResponseBase&&) noexcept = default;
+	ResponseBase& operator=(ResponseBase&&) noexcept = default;
+
+	[[nodiscard]] int status() const noexcept { return status_; }
+	[[nodiscard]] std::string_view content_type() const noexcept { return content_type_; }
+	[[nodiscard]] std::span<const Header> headers() const noexcept { return headers_; }
+
+	Derived& status(int code)
+	{
+		require_config("status");
+		status_ = code;
+		return self();
+	}
+
+	Derived& content_type(std::string_view value)
+	{
+		require_config("content_type");
+		content_type_ = value;
+		return self();
+	}
+
+	Derived& header(std::string_view name, std::string_view value)
+	{
+		require_config("header");
+		headers_.push_back({std::string{name}, std::string{value}});
+		return self();
+	}
+
+	// 预告尾部要补哪些字段（只对 chunked 有意义；SHOULD 预告 —— RFC 9110 §6.6.2）。
+	Derived& trailer(std::string_view name)
+	{
+		require_config("trailer");
+		trailer_names_.emplace_back(name);
+		return self();
+	}
+
+	// 框架在调 handler 之前注入写通道。
+	void attach(ResponseWriter& writer) noexcept { out_ = &writer; }
+
+	// ⚠️ 这里**不能**用 `operator co_await` 让 `co_await res` 生效：asio 的 promise 有成员
+	// `await_transform`，标准规定它**优先于** `operator co_await`（ASIOD 只接受 `awaitable<T,Executor>`
+	// 或 asio 的 async operation 对象，见 asio `impl/awaitable.hpp:186`）。
+	// 所以出网入口就是 `co_await res.flush()` / `co_await res.finish()`。
+
+protected:
+	ResponseBase() = default;
+
+	[[nodiscard]] Derived& self() noexcept { return static_cast<Derived&>(*this); }
+
+	void require_config(std::string_view action) const
+	{
+		if(stage_ != Stage::config) throw_out_of_order(action);
+	}
+
+	void require_writer() const
+	{
+		if(out_ == nullptr) throw std::logic_error{"响应写通道未注入（只能由框架在调 handler 之前 attach）"};
+	}
+
+	// 把响应头发出去；framing 由派生类型给。成功 ⇒ head_sent。
+	asio::awaitable<std::error_code> send_head(std::optional<std::uint64_t> content_length, bool chunked)
+	{
+		require_writer();
+
+		std::vector<Header> hint; // `Trailer:` 预告只要名字，值在末块之后补
+		hint.reserve(trailer_names_.size());
+		for(const std::string& name : trailer_names_) hint.push_back({name, {}});
+
+		const auto ec = co_await out_->write(
+			head_bytes(status_, content_type_, headers_, content_length, chunked, out_->keep_alive(), hint)
+		);
+		if(!ec) stage_ = Stage::head_sent;
+		co_return ec;
+	}
+
+	int status_{200};
+	std::string content_type_{};
+	std::vector<Header> headers_;
+	std::vector<std::string> trailer_names_;
+	ResponseWriter* out_{nullptr};
+	Stage stage_{Stage::config};
 };
 
-// 长度未知 ⇒ 响应侧 chunked，由 handler 分段推。
-// 它是三种响应类型里唯一**在 handler 运行期间就写线上字节**的：写通道由框架在调 handler 前注入。
-struct UnknownLengthResponse
+// 有体的响应：`body(块)` 只是**往内存里追加**，出网是 flush / finish 的事（写由 handler 驱动）。
+// streaming = false：头里写死了 `Content-Length` ⇒ 头一发出就不许再追加。
+template <typename Derived, bool streaming>
+class BodyResponse : public ResponseBase<Derived>
 {
-	int status{200};
-	std::string content_type{"text/plain; charset=utf-8"};
-	std::vector<Header> headers;
+public:
+	using ResponseBase<Derived>::self;
 
-	// 预告尾部要补哪些字段（SHOULD）。必须在**第一次 write 之前**调，否则头已经发出去了。
-	void declare_trailer(std::string_view name);
+	Derived& body(std::string_view data)
+	{
+		if constexpr(streaming)
+		{
+			if(this->stage_ == Stage::finished) throw_out_of_order("body");
+		}
+		else
+		{
+			this->require_config("body");
+		}
+		pending_ += data;
+		return self();
+	}
 
-	// 推一块（第一次调用时把响应头发出去）。空串不产生块（空块就是终止块）。
-	asio::awaitable<bool> write(std::string_view data);
-	// 收尾：末块 + trailer。可重入（重复调无副作用）。
-	asio::awaitable<bool> finish(std::span<const Header> trailers = {});
+	// 还没发出去的体（定长类型 = 整个体）。
+	[[nodiscard]] std::string_view body() const noexcept { return pending_; }
 
-	// 统一入口：handler 没显式 finish 时由框架在这里收尾 ⇒ 三种响应类型的形状一致（`IsResponse`）。
-	asio::awaitable<bool> send(ResponseWriter& writer);
+protected:
+	BodyResponse() = default;
 
-	// 框架注入写通道；`attach` 的存在本身就是“这种响应需要通道”的判据。
-	void attach(ResponseWriter& writer) noexcept { out = &writer; }
-
-private:
-	ResponseWriter* out{nullptr};
-	bool started{false};
-	bool finished{false};
-	std::vector<std::string> trailer_names;
+	std::string pending_{};
 };
 
-// 响应类型的判据（`route::make_arg` 据此区分“请求形参”与“响应形参”）。
+// 有体、长度已知：长度就是 `body()` 攒下的字节数 ⇒ `Content-Length` 定界。
+struct StringResponse : BodyResponse<StringResponse, false>
+{
+	StringResponse() { content_type_ = "text/plain; charset=utf-8"; }
+
+	// flush：发头 + 发体（HEAD 只发头）。定长体一次性发完 ⇒ flush 即收尾。
+	asio::awaitable<std::error_code> flush();
+	// 收尾（= flush，幂等）：给框架兜底与推式响应一个统一的形状。
+	asio::awaitable<std::error_code> finish() { return flush(); }
+};
+
+// 无体响应。⚠️ 刻意**没有** `body(…)` —— 无体响应不接受体，编译期就拦下。
+// ⚠️204 / 304 / 1xx **不得**带 `Content-Length`（RFC 9110 §8.6）；其它状态码是“零长度内容”，
+// 必须写 `Content-Length: 0` 才能定界。
+struct EmptyResponse : ResponseBase<EmptyResponse>
+{
+	EmptyResponse() { status_ = 204; }
+
+	asio::awaitable<std::error_code> flush();
+	asio::awaitable<std::error_code> finish() { return flush(); }
+};
+
+// 长度未知 ⇒ 响应侧 chunked。`body(块)` 攒进内存，`co_await res` 的时候才作为一个块推出去 ——
+// **推的时机由 handler 定**（这正是“写由 handler 驱动”的用处）。
+struct UnknownLengthResponse : BodyResponse<UnknownLengthResponse, true>
+{
+	UnknownLengthResponse() { content_type_ = "text/plain; charset=utf-8"; }
+
+	// flush：头没发就先发头，然后把攒着的字节作为一个块发出去。
+	asio::awaitable<std::error_code> flush();
+	// 收尾：flush + 末块 + trailer（幂等）。handler 不调的话由框架兜底。
+	asio::awaitable<std::error_code> finish(std::span<const Header> trailers = {});
+};
+
+// 响应类型的判据（`route::make_arg` 据此区分“请求形参”与“响应形参”）：
+// 框架要能给它在调 handler 之前注入写通道、在 handler 返回后兜底收尾。
 template <typename T>
 concept IsResponse = requires(T& response, ResponseWriter& writer) {
-	{ response.send(writer) } -> std::same_as<asio::awaitable<bool>>;
+	{ response.attach(writer) } -> std::same_as<void>;
+	{ response.finish() } -> std::same_as<asio::awaitable<std::error_code>>;
 };
 
 enum class ParseStatus
@@ -225,3 +356,9 @@ private:
 };
 
 } // namespace pylai::http
+
+// `std::error_code{WriteErrc::closed}` 与 `ec == WriteErrc::closed` 需要这个特化。
+template <>
+struct std::is_error_code_enum<pylai::http::WriteErrc> : std::true_type
+{
+};

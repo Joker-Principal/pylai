@@ -128,13 +128,14 @@ asio::awaitable<void> Session::run()
 }
 
 // 错误应答：不再保持连接（体大半没读完），发一个最小的字符串响应。
-asio::awaitable<bool> Session::reply_error(int status)
+asio::awaitable<void> Session::reply_error(int status)
 {
 	want_keep_alive = false;
 
 	http::StringResponse response;
-	response.status = status;
-	co_return co_await response.send(*this);
+	response.attach(*this);
+	response.status(status);
+	co_await response.finish();
 }
 
 // 解析到"头部完成"（交棒点）。返回后 parser 已 resume，handler 可以拉体。
@@ -282,7 +283,7 @@ asio::awaitable<bool> Session::fill_buffer()
 	co_return true;
 }
 
-asio::awaitable<bool> Session::write(std::string_view text)
+asio::awaitable<std::error_code> Session::write(std::string_view text)
 {
 	if(!head_written)
 	{
@@ -303,16 +304,19 @@ asio::awaitable<bool> Session::write(std::string_view text)
 	{
 		log::warn("[{}] write timeout", remote);
 		write_failed = true;
-		co_return false;
+		co_return http::make_error_code(http::WriteErrc::timed_out);
 	}
 
 	const auto& [ec, written] = std::get<1>(result);
 	(void)written;
 	if(ec)
 	{
-		throw std::system_error(ec, "write");
+		log::warn("[{}] write failed: {}", remote, ec.message());
+		write_failed = true;
+		co_return http::make_error_code(http::WriteErrc::closed);
 	}
-	co_return true;
+
+	co_return std::error_code{};
 }
 
 bool Session::keep_alive() const noexcept

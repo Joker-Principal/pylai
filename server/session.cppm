@@ -5,6 +5,7 @@ module;
 #include <span>
 #include <string>
 #include <string_view>
+#include <system_error>
 
 export module pylai:session;
 
@@ -28,8 +29,8 @@ public:
 	[[nodiscard]] asio::awaitable<std::size_t> read_some(std::span<char> out) override;
 	[[nodiscard]] bool exhausted() const noexcept override { return body_finished; }
 
-	// http::ResponseWriter：带超时写一段字节（实现见 session.cpp）。
-	[[nodiscard]] asio::awaitable<bool> write(std::string_view bytes) override;
+	// http::ResponseWriter：带超时写一段字节（实现见 session.cpp）。空 error_code = 成功。
+	[[nodiscard]] asio::awaitable<std::error_code> write(std::string_view bytes) override;
 
 	// 响应类型在**发响应头之前**读这两个值：
 	// keep_alive —— 头一写出去就冻结（未读的请求体 ⇒ 只能 close）；head_only —— HEAD 抑制正文。
@@ -43,7 +44,7 @@ private:
 	asio::awaitable<bool> read_headers();		 // 解析到“头部完成”（交棒点） → true
 	asio::awaitable<bool> finish_message();		 // 让 llhttp 走完当前消息（停在下一个请求之前）
 	asio::awaitable<bool> fill_buffer();		 // 带超时读一次
-	asio::awaitable<bool> reply_error(int status); // 错误应答：强制 close + 发一个最小的字符串响应
+	asio::awaitable<void> reply_error(int status); // 错误应答：强制 close + 发一个最小的字符串响应
 
 	void consume(std::size_t n); // 从缓冲区头部摘掉已消费的 n 字节
 
