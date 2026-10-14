@@ -18,19 +18,19 @@ using namespace pylai::route;
 
 struct App
 {
-	asio::awaitable<void> health(Get<"/health"> req, pylai::http::StringResponse& res);
-	asio::awaitable<void> user(Get<"/users/{id}"> req, pylai::http::StringResponse& res);
-	asio::awaitable<void> submit(Post<"/submit/{id}"> req, pylai::http::StringResponse& res);
-	asio::awaitable<void> sse(Get<"/sse"> req, pylai::http::UnknownLengthResponse& res);
+    asio::awaitable<void> health(Get<"/health"> req, StringResponse& res);
+    asio::awaitable<void> user(Get<"/users/{id}"> req, StringResponse& res);
+    asio::awaitable<void> submit(Post<"/submit/{id}"> req, StringResponse& res);
+    asio::awaitable<void> sse(Get<"/sse"> req, UnknownLengthResponse& res);
 };
 
-asio::awaitable<void> App::user(Get<"/users/{id}"> req, pylai::http::StringResponse& res)
+asio::awaitable<void> App::user(Get<"/users/{id}"> req, StringResponse& res)
 {
 	co_await res.body(fmt::format("user id={}\n", req.param<int, "id">())).flush();
 }
 
 // 长度未知：边跑边推（响应侧 chunked），结束时补 trailer
-asio::awaitable<void> App::sse(Get<"/sse">, pylai::http::UnknownLengthResponse& res)
+asio::awaitable<void> App::sse(Get<"/sse">, UnknownLengthResponse& res)
 {
 	// 预告 `Trailer: X-Chunks`（必须在发头之前）→ 头 + 第一块由链尾的 flush 一起发出去
 	if(co_await res.trailer("X-Chunks").body("chunk-a\n").flush()) co_return;
@@ -88,8 +88,8 @@ auto server = pylai::Server::builder()
 | 第一个形参不是 `Get<…>` 这类 | 「路由声明：第一个形参必须是 `Get<"…">` / `Post<"…">` 这样的请求类型…」 |
 | 返回类型不是 `asio::awaitable<void>` | 「路由声明：handler 必须返回 `asio::awaitable<void>`…」 |
 | `param<T, "名字">()` 里的名字不在 pattern 里 | 「路由声明：路径里没有这个名字的命名捕获」 |
-| 形参是别的类型（比如 `int`） | 「路由注入：形参只能是 `Get<…>`（第 0 个）/ 响应类型（`http::StringResponse&` 等）」 |
-| 没写响应形参 | 「路由 handler 必须有一个响应形参：http::StringResponse& / http::EmptyResponse& / http::UnknownLengthResponse&」 |
+| 形参是别的类型（比如 `int`） | 「路由注入：形参只能是 `Get<…>`（第 0 个）/ 响应类型（`route::StringResponse&` 等）」 |
+| 没写响应形参 | 「路由 handler 必须有一个响应形参：route::StringResponse& / route::EmptyResponse& / route::UnknownLengthResponse&」 |
 | 同一动词下两条路由会为同一路径争抢 | 编译错误里直接出现这两条 pattern（`ShadowedRoute<"…", "…">`） |
 | 写了两次 `route_on` | `no member named 'route_on'` —— `route_on` 之后返回的 builder 只剩 `build()` |
 
@@ -102,9 +102,9 @@ auto server = pylai::Server::builder()
 
 | 类型 | 体在哪 | 定界 | 典型用途 |
 |---|---|---|---|
-| `http::StringResponse` | 内存里的字节（`body(块)` 追加） | `Content-Length` | 绝大多数接口 |
-| `http::EmptyResponse` | 无（**没有** `body()`） | 204 / 304 / 1xx：**不发** `Content-Length`；其它状态码发 `Content-Length: 0` | OPTIONS 204、304 |
-| `http::UnknownLengthResponse` | handler 边跑边推（`body(块)` + `flush()`） | **响应侧 chunked** | SSE / 大响应流 |
+| `route::StringResponse` | 内存里的字节（`body(块)` 追加） | `Content-Length` | 绝大多数接口 |
+| `route::EmptyResponse` | 无（**没有** `body()`） | 204 / 304 / 1xx：**不发** `Content-Length`；其它状态码发 `Content-Length: 0` | OPTIONS 204、304 |
+| `route::UnknownLengthResponse` | handler 边跑边推（`body(块)` + `flush()`） | **响应侧 chunked** | SSE / 大响应流 |
 
 公共部分：`status(int)`（默认 200；`EmptyResponse` 默认 204）· `content_type(名字)` · `header(名字, 值)` · `trailer(名字)`（预告）。
 它们**只改状态**（链式，返回具体响应类型，可以混着链）；**出网只有一个动作** —— `co_await res.flush()`。

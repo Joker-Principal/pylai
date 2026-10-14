@@ -20,6 +20,36 @@
 
 ## 阶段 1 · 框架形态定形
 
+- **2026-10-14 · S1-R9 · 报文容器去通道：`http::Request` 只留数据，读通道改由视图携带** ✅ —— 承接用户的分层主张：“`http::Request`/`Response` 应该作为报文容器，不该负责读写功能 / `route::Request`/`route::Response` 才是负责在 `Session` 和 `handler` 之间桥接读写功能的角色”。
+  改法（切片 1，只为“视图持通道”这一步）：`http::Request` 删掉 `body_reader` 与 5 个转发成员（`body()` / `read_some()` / `get_executor()` / `async_read_some()` / `executor_type`），读体改成自由函数 `http::read_body(BodyReader&, reserve_hint)`；
+  `route::Request`（视图）改持“报文数据 + 读通道 + 捕获”三件（`http::BodyReader* in`；`constexpr` 构造函数给它留默认空值，编译期自检照样能造对象）。
+  ⚠️ 连带：擦除边界 `VerbRoutes::invoke` 从 `(const http::Request&, ResponseWriter&)` 变成 `(…, http::BodyReader&, ResponseWriter&)`（形参必须非模板 ⇒ 视图本身**不穿**边界，槽位里再由 `make_arg` 组装）；
+  `Session::run()` 里那句 `req.body_reader = this;` **消失** —— 容器不再需要“被回填”的成员，这本身就是模型变干净的证据。
+  验证：构建退出码 0；e2e **30 条一字未改、全过**。
+
+- **2026-10-14 · S1-R10 · `Parser` 更名 `RequestParser`** ✅ —— 用户：“Parser 改为 RequestParser”。为下一步的 `Context` 让位（它内部的解析器专司请求，名字点明职责）。
+  只改类型名：成员变量 `parser` 与 llhttp 回调形参 `parser` 不动。**这次跑 clice 改名**：`refactor rename --symbol 'server/session.cppm:56' --to ctx --dry-run --fresh`（先看计划：11 处 edits、零 conflicts）→ 去掉 `--dry-run` 落盘；
+  复核用 `references --symbol '#<hex>' --include-declaration`：新名引用点齐全 + 旧类型名零引用 + `stale` 空。
+  验证：构建退出码 0；e2e 全过。
+
+- **2026-10-14 · S1-R11 · `Context` 出世：每请求的两个状态收进一处** ✅ —— 用户的模型（原话）：“不只是 Request，Response 也有状态，相当于在 session 中接到一条客户端请求后，我们要准备一个 `Context`，在其中维护两个状态，它负责报文解析和状态记录，但不负责 IO 动作，这样未来内存管理也有落点”；“handler 里的两个接口是提供给用户驱动的，它自然是同时操作 `Context` 和 `Session` 的”。
+  形状（选项卡里用户选了 **C：视图住 `:route`**）：`:http` 持 `Context{RequestParser parser_; ResponseState response_;}`（请求状态 = llhttp 进度 + 报文数据；响应状态 = status / headers / trailer_names / pending / stage）+ 成帧纯函数 + 两侧通道接口；
+  `:route` 持视图（`Request` + 三种响应）与派发；`:session` 是唯一 IO 实现且**持一个 Context 复用** ⇒ `ResponseState::reset()` 只 `clear` 不释放，缓冲容量跨请求保留。
+  （否决的 B 方案“视图住 `:session`”：`:route` 需要视图类型、`:session` 需要 dispatch ⇒ 成环，得把 dispatch / `VerbRoutes` 搬去 `:server`；A 方案“视图留 `:http`”也自洽，但用户要的是 C。）
+  ⚠️ 落地过程中才看清的三个硬约束：① **读暂存 `Session::buffer` 不能进 Context** —— 它含“跨请求的未消费字节”（pipelining 靠它）⇒ 天生是**连接级**状态，Context 只装每请求的东西；
+  ② **配置响应必须先 `attach`** —— 状态搬走后 `res.status(404).body(…)` 这种“attach 之前先配置”不再成立 ⇒ `route.cpp::text_response` 改成先 `attach(ctx, writer)` 再配置；
+  ③ `Context` 内含 `RequestParser`（有自定义移动）⇒ `http.cppm` 把 `ParseStatus` + `RequestParser` **上移**到 `Request` 之后，顺序成 `Stage → ResponseState → Context → 响应族`。
+  ⚠️ **修订**：我说过“`Context` 不导出”，**不成立** —— `http.cppm` 用的是 `export namespace pylai::http`，里面一切都导出；真要收窄得改成逐名 export，不值得。
+  验证：构建退出码 0；e2e **30 条一字未改、全过**。
+
+- **2026-10-14 · S1-R12 · 响应族搬到 `:route`；响应门面用 deducing this 取代 CRTP** ✅ —— C 方案的收尾，加上用户的一条建议：“你在 ResponseBase 使用 CRTP 我很欣慰，不过 C++23 有 deducing this 了可以简化这个实现”。
+  搬迁：`ResponseBase` / `BodyResponse` / `StringResponse` / `EmptyResponse` / `UnknownLengthResponse` / `IsResponse` 从 `:http` 移入 `pylai::route`；
+  **状态与 `Context` 留 `:http`**（状态是 Context 的一部分，搬走就成环），成帧纯函数与错误码 category 也留 `:http`（协议知识，方向 `:route → :http` 无环）；handler / 测试 / session 的使用点改成 `pylai::route::…`。
+  ⚠️ 这次搬迁**推翻了 S1-R1/R2 把响应族放在 `:http` 的“位置”**，但不推翻它的接口形态：链式填状态 + `flush()` + `finish()` 兜底，一字未改（e2e 30 条零改动就是证据）。
+  去 CRTP：`ResponseBase<Derived>` → **非模板** `ResponseCore`，链式 setter 用显式对象参数（`this Self&& self`）返回 `std::forward<Self>(self)` ⇒ 返回的就是推导出的具体类型；`BodyResponse<Derived, streaming>` → `BodyResponse<streaming>`；三个响应类型改单继承。
+  ⚠️ **踩到的规则**：显式对象成员函数体里**没有隐式 `this`** ⇒ 成员一律写 `self.xxx`（报错原文：`invalid use of member 'ctx_' in explicit object member function`）；真正必须用它的只有两处：需要**返回具体类型**的 setter / `body()`，以及要落到派生那份的 `self.apply_defaults()`。
+  验证：构建退出码 0；e2e **30 条一字未改、全过**；`ResponseBase` 与 `self()` 零残留；clice `symbolSearch` 确认 `ResponseCore` / `UnknownLengthResponse` 的 container 已是 `pylai::route`（`stale` 空）。
+
 - **2026-10-14 · S1-R8 · 两侧通道满足 asio 的 `AsyncReadStream` / `AsyncWriteStream`** ✅ —— 用户：“handle 里的 `Request` 和 `Response` 要分别实现 asio 的这两个概念”。
   落地产出：`http::BodyReader` 与 `http::ResponseWriter` 各加 `executor_type` + `get_executor()` + 内联的 `async_read_some` / `async_write_some` 门面；`http::Request` 与 `route::Request` 转发读侧
   ⇒ handler 里可以直接 `asio::async_read(req, …)` / `asio::async_read_until(req, …)` / `asio::streambuf` 那套。

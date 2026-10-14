@@ -252,7 +252,7 @@ co_await res.status(201).content_type("application/json").header("X-Trace", "abc
 3. **handler 不 flush 怎么办**：框架在 handler 返回后兜底 `co_await response.finish()`（幂等）—— “链完了忘了发”不会把连接卡死。
 4. **multipart**：不是 llhttp 的活，是 body 之上的**增量**解析器。先只给全量 `co_await req.body()`（受 `max_body_bytes` 约束），流式与 multipart 留到有真实需求。
 
-> 已验证可沿用：`Parser::execute()` 已把 `HPE_PAUSED` 翻成 `headers_complete` / `message_complete` 两个状态，
+> 已验证可沿用：`RequestParser::execute()` 已把 `HPE_PAUSED` 翻成 `headers_complete` / `message_complete` 两个状态，
 > `resume()` 解暂停（`server/http.cpp:220~229`）——“继续喂字节”已经是 handler 可驱动的入口（`Session::read_some`）。
 
 **本层还要决定的** → 已展开为 §4.1.2：
@@ -335,7 +335,7 @@ e2e 已各加一条用例（handler 完全不读 / 读一半）看真实表现�
 | 停点位 | 头部阶段停在 `on_headers_complete`、消息收尾停在 `on_message_complete`（各停一次） | `execute` 把 `HPE_PAUSED` 翻成两个状态，`resume()` 解暂停 |
 | keep_alive / path / query | 都在 `on_headers_complete` 里算（此时都已定型） | ✅ 依据见下方注 |
 | 继续喂字节 | handler 侧：先把**已缓冲**的 `buffer[consumed, buffered)` 喂给 `parser.resume()`；不够才 `fill_buffer()` | ✅ 复用 `fill_buffer()` 里的 `idle_timeout`（`server/session.cpp:256`）⇒ handler 绕不过超时/取消 |
-| 载荷交付 | `on_body` 把载荷写进**调用者给的缓冲**（不缓存在 Parser 里、不暂停 llhttp） | 为何不在 `on_body` 里 pause：① 暂停后可能“无字节可喂而挂住”；② 未领完的载荷得挂一个指向内部缓冲的 span，而 `consume()` 会 memmove 使 span 失效。<br>⇒ **每次喂给 llhttp 的输入窗口夹到 `out.size()`**，`on_body` 拿到的载荷必在输入区间内、必定放得下 |
+| 载荷交付 | `on_body` 把载荷写进**调用者给的缓冲**（不缓存在 RequestParser 里、不暂停 llhttp） | 为何不在 `on_body` 里 pause：① 暂停后可能“无字节可喂而挂住”；② 未领完的载荷得挂一个指向内部缓冲的 span，而 `consume()` 会 memmove 使 span 失效。<br>⇒ **每次喂给 llhttp 的输入窗口夹到 `out.size()`**，`on_body` 拿到的载荷必在输入区间内、必定放得下 |
 | 进度记账 | ✅ **不需要新机制** | 就用 llhttp 的 `consumed`（= `error_pos - data`）+ 窗口夹取；`Session::consume()` 用法不变 |
 | 失败怎么表达 | ✅ `http::BodyError{status, message}`：413（chunked 超限）/ 400（体协议错）/ 0（对面断了，无响应可发） | 连接层一个 catch 收口（`session.cpp` 的 `run()`） |
 
@@ -362,6 +362,47 @@ e2e 已各加一条用例（handler 完全不读 / 读一半）看真实表现�
 
 **H. 额外收益：背压天然到手** —— 拉取式 ⇒ 框架只在 handler 要字节时才读 socket，不会“读太快把内存塞满”。
 唯一例外是 `body()`（受上限约束）。
+
+#### 4.1.3 分层重划：Context 持状态，视图桥接读写（✅ 已落地）
+
+**用户给的主张**：`http::Request` / `http::Response` 只做**报文容器**；接到一条请求后，为它准备一个 **`Context`**，
+在里维护**两个状态**（请求 + 响应），它负责**报文解析与状态记录、但不做 IO** —— 于是“每请求的内存”有了落点（可跨请求复用）。
+handler 拿到的两个接口**由用户驱动**，它们同时操作 `Context`（状态）与 `Session`（IO）。
+
+**四层各是什么**
+
+| 层 | 是什么 | 不做什么 |
+|---|---|---|
+| `http::Context` | 每请求的**两个状态**（请求 = llhttp 进度 + 报文数据；响应 = `ResponseState`）+ 自用缓冲 | **不碰 socket**、不做 IO |
+| `http::RequestParser` | `Context` 里的请求解析器（llhttp 的持有者） | —— |
+| `route::Request` / 三种响应 | 给 handler 的**视图**：持 `Context&` + 读/写通道 ⇒ 同时操作 Context 与 Session | **不存状态**（薄门面，状态全在 Context） |
+| `Session` | 唯一的 IO 实现（socket / 超时 / 喂字节），且**持一个 Context 复用** | 不做协议状态决策 |
+
+**归位表**（现状）
+
+| 符号 | 住哪 | 为什么 |
+|---|---|---|
+| 报文容器 `http::Request` | `:http` | 纯数据，不带宽读能力 |
+| `RequestParser` · `Context` · `ResponseState` · `Stage` · `throw_out_of_order` | `:http` | 协议状态；状态搬走就成环（`Context` 自己持它） |
+| 成帧纯函数 `head_bytes` / `chunk_bytes` / `last_chunk_bytes`、错误码 category | `:http` | 协议知识 + 两侧共用；方向 `:route → :http` 无环 |
+| 通道接口 `BodyReader` / `ResponseWriter` | `:http` | 连接层实现、协议层消费（唯一的两处虚接口） |
+| 视图 `route::Request`、响应族 `ResponseCore` / `BodyResponse<streaming>` / 三种响应 / `IsResponse` | `:route` | handler 看到的类型与路由声明同层；持 `Context&` 只是引用，不成环 |
+| 派发链 `VerbRoutes::{matched, invoke}` | `:route` | 擦除边界 = `(Context&, BodyReader&, ResponseWriter&)` |
+| IO 实现 | `:session` | 只有它碰 socket；模块依赖图**未变**（`:config ← :http ← :route ← :session ← :server`） |
+
+**两条硬边界**（落地过程中才看清，写下来免得以后踩）
+
+- **读暂存天生是连接级的**：`Session::buffer` 里有“跨请求的未消费字节”（pipelining 靠它）⇒ **不进 Context**。Context 只装**每请求**的东西。
+- **配置响应必须在 `attach(Context&, ResponseWriter&)` 之后**：`attach` 会 `reset()` 上一次的响应状态（只 `clear`、**保留缓冲容量**）并写入该类型的默认值（`apply_defaults()`）。
+  因此“先 `res.status(404).body(…)`、再 attach”的写法不再成立 —— `route.cpp` 的 `text_response` 就是改成了先 attach 再配置。
+
+**对外形态一字未改**：handler 仍是 2 个形参（`Get<"/x"> req, StringResponse& res`），链式填状态 + `co_await res.flush()`，`finish()` 仍由框架兜底。
+**验收**：三步切片（容器去通道 → Context 出世 → 响应族搬 `:route`）每一步都跑构建 + e2e，**30 条一字未改、全过** ⇒ 纯内部重构，对外零变化。
+
+**响应门面的实现**：用 **deducing this**（C++23 显式对象参数）取代 CRTP —— `ResponseCore`（非模板）持状态指针，链式 setter 写成
+`template <typename Self> auto&& status(this Self&& self, int code)`，返回 `std::forward<Self>(self)` 即“返回具体类型”。
+于是 `res.status(201).body("x").flush()` 依旧成立，而三个响应类型只需**单继承**、`BodyResponse` 也只剩 `<streaming>` 一个参数。
+⚠️ 显式对象成员函数体里**没有隐式 `this`** ⇒ 成员一律写 `self.xxx`。
 
 ---
 
