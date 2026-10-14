@@ -22,6 +22,17 @@ namespace pylai::route {
 
 namespace {
 
+// 观测钩子的收尾：RAII ⇒ `dispatch` 的**每个出口**（含 404 / 405 / 早返回）都算“离开”。
+struct DispatchGuard
+{
+	Observer* observer;
+	http::Context* ctx;
+	~DispatchGuard()
+	{
+		if(observer != nullptr) observer->on_request_end(*ctx);
+	}
+};
+
 // 字节版；文本写法另给 `string_view` 重载（与 `res.body(…)` 同一个策略）。
 // ⚠️ 状态住在 Context 里 ⇒ 必须**先 attach 再配置**（框架造响应一律这个次序）。
 [[nodiscard]] StringResponse text_response(
@@ -73,10 +84,17 @@ Router::~Router() = default;
 
 void Router::set_routes(std::vector<VerbRoutes> routes) { methods = std::move(routes); }
 
+void Router::set_observer(Observer* observer) noexcept { observer_ = observer; }
+
 asio::awaitable<void> Router::dispatch(
 	http::Context& ctx, http::BodyReader& in, http::ResponseWriter& writer
 ) const
 {
+	// 观测钩子的**边界**：进入 / 离开各一次 —— 放在这里才能覆盖 404 / 405 / OPTIONS 这些没进 handler 的请求。
+	// ⚠️ 无观察者时只剩一次可预测的分支（plan §4.1.4）。
+	const DispatchGuard guard{observer_, &ctx};
+	if(observer_ != nullptr) observer_->on_request_begin(ctx);
+
 	const http::Request& request = ctx.request();
 
 	// 快路径：只试请求动词那个单元（匹配与调用在同一处，命中后捕获直接交给 handler）。

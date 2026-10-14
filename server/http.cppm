@@ -325,6 +325,16 @@ public:
 	}
 };
 
+// 每请求的观测 / 参数落点（**空壳**：Stage 3 才往里填字段，见 docs/http-server-plan.md §4.1.4）。
+// ⚠️ 关掉观测（`PYLAI_ENABLE_OBSERVATION=OFF`）时它是**空结构** ⇒ 靠 `[[no_unique_address]]`
+//    在 `Context` 里不占字节、也不加分支。
+struct Observation
+{
+#if PYLAI_ENABLE_OBSERVATION
+	std::uint64_t route_fingerprint{0}; // 命中的路由（0 = 没命中任何路由）
+#endif
+};
+
 // 一条请求 / 响应事务的**状态**（不做 IO）：
 //   请求侧 —— llhttp 解析进度 + 已解析的报文数据（`RequestParser`）
 //   响应侧 —— status / headers / trailer 预告 / 待写体 / 写到哪一步（`ResponseState`）
@@ -352,9 +362,14 @@ public:
 	[[nodiscard]] ResponseState& response() noexcept { return response_; }
 	[[nodiscard]] const ResponseState& response() const noexcept { return response_; }
 
+public:
+	// ═══ 观测 / 参数（空壳） ═══
+	[[nodiscard]] Observation& observation() noexcept { return observation_; }
+
 private:
 	RequestParser parser_;
 	ResponseState response_;
+	[[no_unique_address]] Observation observation_{};
 };
 
 } // namespace pylai::http

@@ -29,6 +29,19 @@ import :http;
 // 一律**不导出** —— 同模块的其他 TU（`route.cpp` / `server.cppm` / `session.cppm` / `route.checks.cpp`）照样看得见。
 namespace pylai::route {
 
+// 观测钩子：请求**进入 / 离开**那一刻各一次 —— 由应用实现，框架只负责在边界上叫它。
+// ⚠️ Stage 1 只**接线**，不实现采集（分片计数 / 直方图属 Stage 3，见 plan §4.1.4）；默认无观察者。
+// 为什么是钩子而不只是 `Context` 里的槽：槽是**载体**（这次请求的数据放哪），钩子是**边界** ——
+// 只有槽的话，404 / 405 / OPTIONS 这些**没进 handler** 的请求就没人记。
+export class Observer
+{
+public:
+	virtual ~Observer() = default;
+
+	virtual void on_request_begin(http::Context&) {}
+	virtual void on_request_end(http::Context&) {}
+};
+
 // 每个出现过的动词**一处**类型擦除单元（树 + 具体类型的槽位表，定义在后半）。
 struct VerbRoutes;
 
@@ -49,6 +62,10 @@ public:
 	void set_routes(std::vector<VerbRoutes> routes);
 
 public:
+	// 观测钩子（可选）：接线点在 `dispatch` 的进入 / 离开。传 `nullptr` 取消。
+	void set_observer(Observer* observer) noexcept;
+
+public:
 	// 命中 → handler（响应由 handler 的响应类型自己发到通道）；HEAD 没有显式 `Head<>` 时落到同路径的 GET（正文由响应类型按 HEAD 抑制）；
 	// 路径存在但动词不符 → 405 + `Allow`；OPTIONS 没有显式 `Options<>` 时自动 204 + `Allow`；否则 404。
 	// `ctx` 是这条事务的状态（报文数据 + 响应状态）；两个通道只能从连接层来。
@@ -59,6 +76,7 @@ public:
 private:
 	// 每个出现过的动词一条。
 	std::vector<VerbRoutes> methods;
+	Observer* observer_{nullptr};
 };
 
 // ═══ path pattern —— 编译期解析 ═══
@@ -769,6 +787,17 @@ public:
 	static constexpr auto literal = pattern; // 可当模板实参（按成员逐项结构等价）
 	static constexpr std::string_view route_pattern = pattern.view();
 
+	// 类别的**稳定标识**：`method + pattern` 的 FNV-1a —— 观测归因与“指纹 → 参数”表的键（§4.1.4）。
+	// ⚠️ 必须**稳定**：不吃编译器的类型 hash（那会随编译选项 / 版本变）。
+	[[nodiscard]] static constexpr std::uint64_t fingerprint() noexcept
+	{
+		std::uint64_t h = 1469598103934665603ull;
+		for(const char c : to_string(verb)) h = (h ^ static_cast<std::uint64_t>(c)) * 1099511628211ull;
+		h = (h ^ static_cast<std::uint64_t>(':')) * 1099511628211ull;
+		for(const char c : pattern.view()) h = (h ^ static_cast<std::uint64_t>(c)) * 1099511628211ull;
+		return h;
+	}
+
 	// 命名捕获在 pattern 里的下标；没这个名字 → `params().size()`（越界，正是 `param()` 用来拦错的判据）。
 	// ⚠️ 不能用 static 局部变量存 `Pattern`（`params()` 的 span 指向它，而 constexpr 函数不许有静态变量）。
 	[[nodiscard]] static constexpr std::size_t slot_of(std::string_view name) noexcept
@@ -1270,6 +1299,10 @@ template <class C, class F, std::size_t... indices>
 		using Response = std::remove_cvref_t<typename Params::template At<response_slot>>;
 		Response response;
 		response.attach(ctx, writer); // 注入状态的家 + 写通道；之后什么时候写由 handler / 响应类型定
+#if PYLAI_ENABLE_OBSERVATION
+		// 观测挂点：告诉这次请求命中了哪条路由（类别 = 指纹，见 plan §4.1.4）。
+		ctx.observation().route_fingerprint = Request<RouteOf<F>::verb, RouteOf<F>::pattern>::fingerprint();
+#endif
 		co_await (self->*pmf)(make_arg<indices, F>(ctx, in, response, captures)...);
 		co_await response.finish(); // 兜底：handler 没显式收尾时由框架收（幂等）
 	};

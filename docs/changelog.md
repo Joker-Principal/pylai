@@ -20,6 +20,13 @@
 
 ## 阶段 1 · 框架形态定形
 
+- **2026-10-14 · S1-R13 · 挂点空壳落地：观测槽 / Observer 钩子 / 类别指纹** ✅ —— Stage 1 的最后一件（设计在 plan §4.1.4）。
+  落地产出：① `route::Request<v,p>::fingerprint()` —— `method + pattern` 的 FNV-1a（**稳定**标识，不吃编译器类型 hash）；② `http::Observation` 每请求槽，`Context` 以 `[[no_unique_address]]` 持一份（现在只有一个 `route_fingerprint`，其余字段留给 Stage 3）；
+  ③ `route::Observer`（`on_request_begin/end`）+ `Router::set_observer`，接线在 `Router::dispatch` 的**进入 / 离开** —— 用 RAII 的 `DispatchGuard` 保证**所有出口**（含 404 / 405 / 早返回）都算离开。
+  编译开关 `PYLAI_ENABLE_OBSERVATION`（**默认 ON** —— 用户定：自适应调优是本项目的特色），关掉时观测槽退化为空结构、不发分支；成本不猜，在 benchmark 阶段开 / 关各跑一次量。
+  为何槽与钩子**都留**：槽是**载体**（这次请求的数据放哪），钩子是**边界**（请求开始 / 结束）；只有槽的话，404 / 405 / OPTIONS 这些没进 handler 的请求就没人记。
+  验证：构建退出码 0；e2e **30 条一字未改、全过**。待补：`route.checks.cpp` 的指纹护栏（同 path 不同动词的指纹必须不同）。
+
 - **2026-10-14 · S1-R9 · 报文容器去通道：`http::Request` 只留数据，读通道改由视图携带** ✅ —— 承接用户的分层主张：“`http::Request`/`Response` 应该作为报文容器，不该负责读写功能 / `route::Request`/`route::Response` 才是负责在 `Session` 和 `handler` 之间桥接读写功能的角色”。
   改法（切片 1，只为“视图持通道”这一步）：`http::Request` 删掉 `body_reader` 与 5 个转发成员（`body()` / `read_some()` / `get_executor()` / `async_read_some()` / `executor_type`），读体改成自由函数 `http::read_body(BodyReader&, reserve_hint)`；
   `route::Request`（视图）改持“报文数据 + 读通道 + 捕获”三件（`http::BodyReader* in`；`constexpr` 构造函数给它留默认空值，编译期自检照样能造对象）。

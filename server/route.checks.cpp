@@ -104,6 +104,14 @@ static_assert(std::is_same_v<typename Submit::Params::template At<1>, pylai::rou
 
 // 命名捕获的**下标**在编译期算出来 —— 运行期只按这个下标取值，不按名字查找
 static_assert(Request<Verb::post, "/submit/{id}">::slot_of("id") == 0);
+
+// 挂点（plan §4.1.4）：类别指纹必须**稳定**且**区分得开** —— 同一个 path 的不同动词不能撞。
+static_assert(Request<Verb::get, "/x">::fingerprint() != Request<Verb::post, "/x">::fingerprint());
+static_assert(Request<Verb::get, "/x">::fingerprint() != Request<Verb::get, "/y">::fingerprint());
+static_assert(Request<Verb::get, "/x">::fingerprint() == Request<Verb::get, "/x">::fingerprint()); // 稳定 ⇒ 同一声明同值
+#if PYLAI_ENABLE_OBSERVATION
+static_assert(!std::is_empty_v<pylai::http::Observation>); // 默认开启 ⇒ 观测槽有字段
+#endif
 static_assert(Request<Verb::get, "/files/{path...}">::slot_of("path") == 0);
 static_assert(Request<Verb::get, "/users/{id}/posts/{pid}">::slot_of("pid") == 1);
 // 没这个名字 → 返回 `params().size()`（越界；`param()` 正是拿它拦错的）

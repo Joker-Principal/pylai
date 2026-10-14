@@ -37,3 +37,9 @@ target_link_libraries(pylai
         fmt::fmt
         spdlog::spdlog
 )
+
+# 观测开关：自适应调优是本项目的**特色** ⇒ 默认 ON（见 docs/http-server-plan.md §4.1.4）。
+# 关掉时观测槽与钩子不产生字段、不加分支；开销由 benchmark 阶段量（开 / 关各跑一次）。
+# ⚠️ 接口单元里有 `#if`，消费方必须看到同一个定义 ⇒ PUBLIC。
+option(PYLAI_ENABLE_OBSERVATION "编译进观测钩子与每请求观测槽" ON)
+target_compile_definitions(pylai PUBLIC PYLAI_ENABLE_OBSERVATION=$<BOOL:${PYLAI_ENABLE_OBSERVATION}>)
