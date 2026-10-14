@@ -75,6 +75,10 @@ CASES = [
     ("POST", "/body", b"x" * 1025, 413, "413", False),                        # 测试程序把上限设为 1024 → 413
     # 长度未知（chunked）⇒ 头部阶段判不出来，只能由读体侧计数拦下（走 BodyError 那条路）
     ("POST", "/body", b"y" * 1025, 413, "413", False, True),
+
+    # 用 asio 的组合操作读体（`asio::async_read` + 动态缓冲）—— 验证通道是 AsyncReadStream，
+    # 且“体到尾”在门面侧被翻译成 asio 语义的 `eof`。
+    ("POST", "/count", b"hello", 200, "count=5 eof=true", False),
 ]
 
 def check(method, target, body, want_status, want_text, want_empty_body, chunked=False):

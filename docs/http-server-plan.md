@@ -268,15 +268,21 @@ co_await res.status(201).content_type("application/json").header("X-Trace", "abc
 
 | 方案 | 形态 | 结论 |
 |---|---|---|
-| ① **抽象基类** ✅ 已定 | `http::BodyReader`：`virtual awaitable<std::size_t> read_some(std::span<std::byte>) = 0;` + `virtual bool exhausted() const;`；`http::Request` 持 `BodyReader*`（nullptr = 无体）。实现类就是 `Session` 自己。⚠️ **修订**：曾以为“擦除点合并后会被重构掉”—— **不成立**（见 §11.2 C 后的注） | 每次读一次虚调用，相对一次 `async_read_some` 可忽略 |
+| ① **抽象基类** ✅ 已定 | `http::BodyReader`：`virtual awaitable<std::size_t> read_some(std::span<std::byte>) = 0;` + `virtual bool exhausted() const;`；`http::Request` 持 `BodyReader*`（nullptr = 无体）。实现类就是 `Session` 自己。⚠️ **修订**：曾以为“擦除点合并后会被重构掉”—— **不成立**（见 §11.2 C 后的注）。**它满足 asio 的 `AsyncReadStream`**（`executor_type` + `get_executor()` + 内联 `async_read_some` 门面） | 每次读一次虚调用，相对一次 `async_read_some` 可忽略 |
 | ② 函数指针表 | `{void* self; awaitable<std::size_t> (*fn)(void*, std::span<std::byte>);}` | 同样的间接层，但要手工绑 `self`，一样省不下 |
 | ③ 交棒前把体读完 | — | 与“先路由再读体”直接矛盾（404/405 不该等体） |
 
 **A′. 写通道 `http::ResponseWriter`**（与 reader 同一套理由）：`virtual awaitable<std::error_code> write(std::string_view)` +
 `keep_alive()` / `head_only()` 两个采样口（`server/http.cppm`）；实现类同样是 `Session`。
 ⚠️ 返回 `std::error_code`（`http::WriteErrc`）而不是 `bool` —— 超时与断连分得开，且不靠异常传达“连接没了”。
+**它满足 asio 的 `AsyncWriteStream`**（`executor_type` + `get_executor()` + 内联 `async_write_some` 门面）。
 ⚠️ `Session` 同时实现这两个接口（`class Session : public http::BodyReader, public http::ResponseWriter`）。
 **它们不是临时方案**（擦除点合并只动 handler 表，与这两个通道无关）：请求/响应的接口要能穿过擦除边界，就必须是非模板的。
+
+**A″. 为什么门面必须内联、以及怎么桥接**（S1-R8）：概念要求的 `async_read_some(buffers, token)` 里 token 是**模板** ⇒ 不可能虚化，
+所以虚接口仍是协程式（`read_some` / `write`），门面内联在接口里、用 `co_composed` + `co_spawn(…, deferred)` 把协程包成操作对象。
+门面还负责三处语义适配：内部 `0` → asio 的 `eof`；`BodyError` → `BodyErrc`（`value()` 就是 HTTP 状态码）；
+读只填第一段、写一次写完整块（均比概念要求更强）。
 
 **B. 全量读与增量读**：`co_await req.body()` → `std::vector<std::byte>`（受 `max_body_bytes` 约束）；
 `co_await req.read_some(buf)` 给大文件 / SSE（返回 0 = 体结束）。二者共用一个 reader。

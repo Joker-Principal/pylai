@@ -20,6 +20,21 @@
 
 ## 阶段 1 · 框架形态定形
 
+- **2026-10-14 · S1-R8 · 两侧通道满足 asio 的 `AsyncReadStream` / `AsyncWriteStream`** ✅ —— 用户：“handle 里的 `Request` 和 `Response` 要分别实现 asio 的这两个概念”。
+  落地产出：`http::BodyReader` 与 `http::ResponseWriter` 各加 `executor_type` + `get_executor()` + 内联的 `async_read_some` / `async_write_some` 门面；`http::Request` 与 `route::Request` 转发读侧
+  ⇒ handler 里可以直接 `asio::async_read(req, …)` / `asio::async_read_until(req, …)` / `asio::streambuf` 那套。
+  语义适配（门面负责，内部不动）：① 内部用 `0` 表示“体到尾”，门面翻译成 asio 语义的 **`eof`**；② `BodyError` 异常 → **`BodyErrc`**（新增的 category，`value()` 就是该回的 HTTP 状态码）；
+  ③ 读只填**第一段非空** buffer、写**一次写完整块**（都比概念要求的“写/读一部分”更强，概念允许）—— 写侧单段零拷贝、多段才聚合。
+  ⚠️ **踩到的真实约束**：概念要求 `executor_type` 成员类型（不只是 `get_executor()`）—— 这个只有拿 `asio::async_read` 去消费才会暴露。
+  ⚠️ **另一个坑**：`co_composed` 的 promise **只接受“异步操作对象”**，不接受 `asio::awaitable` ⇒ 我们的虚接口（协程）不能直接 `co_await`。
+  桥接手段：`co_await asio::co_spawn(self->get_executor(), self->read_some(span), asio::deferred)` —— 把协程包成操作对象，
+  **不额外分配**（协程帧在调 `read_some` 时就建好了，`deferred` 只是包一层）。`co_return {ec, n}` 上报完成。
+  验证（两层）：① **编译期护栏** `tests/stream_concepts.cpp` —— 直接拿 `asio::async_read` / `async_write` 去消费三个通道，
+  asio 自己会查概念的每一项（缺 `executor_type` 就是它报的）；② **运行期** e2e 新增 `POST /count`：
+  handler 用 `asio::async_read(req, dynamic_buffer(body), …)` 读到 **eof**，断言 `count=5 eof=true` ⇒ 组合操作与 eof 翻译都真的工作。
+  e2e 29→**30** 全过，既有 29 条一字未改；构建退出码 0。
+  🔍 未做：外部取消没有向内的传播（门面没接 cancellation slot）。
+
 - **2026-10-14 · S1-R7 · 收窄 `route` 的导出面；编译期自检搬进模块** ✅ —— 用户：“route 模块 export 太多实现用的符号了，这个机会也顺便修一修，以及这条加入编码纪律”。
   现状是 `export module pylai:route;` + **`export namespace`** ⇒ 整份 1000 行（`FixedString` / `Segment` / `RadixTree` / `PieceCursor` / `insert_pattern` / `k_no_route` …）全在导出面上。
   改法：去掉整块导出，**逐个**给公开 API 加 `export` —— 公开面只剩 `Verb` · `Request<verb, pattern>` · 七个动词别名（`Get`/`Post`/`Put`/`Delete`/`Head`/`Options`/`Patch`）· `Pattern<s>` · `ParseError` · `to_string(ParseError)`。

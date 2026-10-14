@@ -31,10 +31,37 @@ struct Header
 	return {reinterpret_cast<const char*>(bytes.data()), bytes.size()};
 }
 
+// 读体失败的码 —— `value()` 直接就是该回的 HTTP 状态码（`closed` = 对面断了，无响应可发）。
+// 给“用 asio 组合操作读体”的 handler 一个 `error_code` 形态（异常路径仍是 `BodyError`）。
+enum class BodyErrc : int
+{
+	closed = 0,      // 对面已断 / 超时 ⇒ 没法应答
+	too_large = 413, // 超过 max_body_bytes
+	bad_request = 400,
+};
+
+[[nodiscard]] const std::error_category& body_category() noexcept;
+[[nodiscard]] std::error_code make_error_code(BodyErrc value) noexcept;
+
+// 读体失败的异常：`status != 0` ⇒ 连接层回这个状态码并关连接；`status == 0` ⇒ 对面已断/超时，只收工。
+class BodyError : public std::runtime_error
+{
+public:
+	BodyError(int status, std::string message) : std::runtime_error{std::move(message)}, status_(status) {}
+	[[nodiscard]] int status() const noexcept { return status_; }
+
+private:
+	int status_;
+};
+
 // 读体的句柄：实现在连接层（`Session`），框架与 handler 只认这个接口。
+// 它满足 asio 的 **`AsyncReadStream`**：`get_executor()` + `async_read_some(序列, token)`
+// ⇒ `asio::async_read` / `async_read_until` 之类的组合操作可以直接吃它。
 class BodyReader
 {
 public:
+	using executor_type = asio::any_io_executor;
+
 	BodyReader() = default;
 	virtual ~BodyReader() = default;
 	BodyReader(const BodyReader&) = delete;
@@ -44,19 +71,47 @@ public:
 	// 0 = 体已到尾。out 不得为空（否则 std::invalid_argument）；失败抛 BodyError。
 	virtual asio::awaitable<std::size_t> read_some(std::span<std::byte> out) = 0;
 
-	// 本请求的体是否已读完 —— 框架据此判“未读体 ⇒ Connection: close”。
-	[[nodiscard]] virtual bool exhausted() const noexcept = 0;
-};
+	[[nodiscard]] virtual asio::any_io_executor get_executor() noexcept = 0;
 
-// 读体失败：`status != 0` ⇒ 连接层回这个状态码并关连接；`status == 0` ⇒ 对面已断/超时，只收工（无响应可发）。
-class BodyError : public std::runtime_error
-{
-public:
-	BodyError(int status, std::string message) : std::runtime_error{std::move(message)}, status_(status) {}
-	[[nodiscard]] int status() const noexcept { return status_; }
+	// ⚠️ completion token 是模板 ⇒ 不可能虚化；门面内联在这里，虚实现仍是上面的 `read_some`。
+	// 只填**第一段非空** buffer：概念只要求“写了 ≥1 字节”，组合操作会自己循环。
+	// 内部用 0 表示“体到尾”，门面翻译成 asio 语义的 `eof`。
+	template <typename MutableBufferSequence, typename CompletionToken>
+	auto async_read_some(const MutableBufferSequence& buffers, CompletionToken&& token)
+	{
+		return asio::async_initiate<CompletionToken, void(std::error_code, std::size_t)>(
+			asio::co_composed<void(std::error_code, std::size_t)>(
+				[](auto state, BodyReader* self, MutableBufferSequence buffers) -> void {
+					auto it = asio::buffer_sequence_begin(buffers);
+					const auto end = asio::buffer_sequence_end(buffers);
+					while(it != end && it->size() == 0) ++it;
+					if(it == end)
+					{
+						co_return {asio::error::invalid_argument, std::size_t{0}};
+					}
 
-private:
-	int status_;
+					const auto span = std::span{static_cast<std::byte*>(it->data()), it->size()};
+					try
+					{
+						// `co_composed` 只接受**异步操作** ⇒ 用 `co_spawn(…, deferred)` 把虚接口的
+						// 协程包成操作对象（不额外分配：协程帧在调 `read_some` 时就建好了）。
+						const std::size_t n =
+							co_await asio::co_spawn(self->get_executor(), self->read_some(span), asio::deferred);
+						if(n == 0) co_return {asio::error::eof, std::size_t{0}};
+						co_return {std::error_code{}, n};
+					}
+					catch(const BodyError& e)
+					{
+						co_return {make_error_code(static_cast<BodyErrc>(e.status())), std::size_t{0}};
+					}
+				},
+				*this
+			),
+			token,
+			this,
+			buffers
+		);
+	}
 };
 
 // 一个请求的语义视图：start line + headers。
@@ -83,6 +138,18 @@ struct Request
 	// 这个请求有没有体（框架用来决定要不要让 llhttp 继续走完消息）。
 	[[nodiscard]] bool has_body() const noexcept { return chunked || content_length > 0; }
 
+	// 转发读通道（让 `asio::async_read(req, …)` 之类的组合操作直接吃 `Request`）。
+	using executor_type = asio::any_io_executor; // asio 的流概念要求这个成员类型
+	[[nodiscard]] executor_type get_executor() const noexcept
+	{
+		return body_reader != nullptr ? body_reader->get_executor() : asio::any_io_executor{};
+	}
+	template <typename MutableBufferSequence, typename CompletionToken>
+	auto async_read_some(const MutableBufferSequence& buffers, CompletionToken&& token) const
+	{
+		return body_reader->async_read_some(buffers, std::forward<CompletionToken>(token));
+	}
+
 	// 读完整个体（受 `max_body_bytes` 约束）；无体 ⇒ 空。
 	[[nodiscard]] asio::awaitable<std::vector<std::byte>> body() const;
 	// 增量读一段（大文件 / SSE 用）；返回 0 = 体结束。
@@ -100,9 +167,13 @@ enum class WriteErrc
 [[nodiscard]] std::error_code make_error_code(WriteErrc value) noexcept;
 
 // 响应侧的写通道：擦除边界上**唯一能碰 socket** 的东西（实现在连接层 `Session`）。
+// 它满足 asio 的 **`AsyncWriteStream`**：`get_executor()` + `async_write_some(序列, token)`
+// ⇒ `asio::async_write` 之类的组合操作、以及任何接受写流的东西可以直接吃它。
 class ResponseWriter
 {
 public:
+	using executor_type = asio::any_io_executor;
+
 	ResponseWriter() = default;
 	virtual ~ResponseWriter() = default;
 	ResponseWriter(const ResponseWriter&) = delete;
@@ -114,6 +185,44 @@ public:
 	// ⚠️ 必须在**发响应头之前**读，且只反映“此刻”：头一写出去就冻结，HEAD 抑制正文。
 	[[nodiscard]] virtual bool keep_alive() const noexcept = 0;
 	[[nodiscard]] virtual bool head_only() const noexcept = 0;
+
+	[[nodiscard]] virtual asio::any_io_executor get_executor() noexcept = 0;
+
+	// `async_write_some` 允许“一次写完整块”（比概念要求的“写一部分”更强）；
+	// 单段零拷贝，多段才聚合（多段是少数）。
+	template <typename ConstBufferSequence, typename CompletionToken>
+	auto async_write_some(const ConstBufferSequence& buffers, CompletionToken&& token)
+	{
+		return asio::async_initiate<CompletionToken, void(std::error_code, std::size_t)>(
+			asio::co_composed<void(std::error_code, std::size_t)>(
+				[](auto state, ResponseWriter* self, ConstBufferSequence buffers) -> void {
+					const std::size_t total = asio::buffer_size(buffers);
+					if(total == 0) co_return {std::error_code{}, std::size_t{0}};
+
+					const auto begin = asio::buffer_sequence_begin(buffers);
+					std::vector<std::byte> joined;
+					std::span<const std::byte> bytes;
+					if(begin->size() == total)
+					{
+						bytes = {static_cast<const std::byte*>(begin->data()), total};
+					}
+					else
+					{
+						joined.resize(total);
+						asio::buffer_copy(asio::buffer(joined), buffers);
+						bytes = joined;
+					}
+
+					const auto ec = co_await asio::co_spawn(self->get_executor(), self->write(bytes), asio::deferred);
+					co_return {ec, ec ? std::size_t{0} : total};
+				},
+				*this
+			),
+			token,
+			this,
+			buffers
+		);
+	}
 };
 
 // 成帧：纯函数（不碰 socket）。`head_bytes` 返回**文本**（状态行 + 字段），chunk / 末块返回**字节**。
@@ -363,5 +472,10 @@ private:
 // `std::error_code{WriteErrc::closed}` 与 `ec == WriteErrc::closed` 需要这个特化。
 template <>
 struct std::is_error_code_enum<pylai::http::WriteErrc> : std::true_type
+{
+};
+
+template <>
+struct std::is_error_code_enum<pylai::http::BodyErrc> : std::true_type
 {
 };

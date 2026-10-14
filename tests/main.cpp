@@ -39,6 +39,9 @@ struct App
 
 	// 长度未知的响应：handler 在**运行期间**分段推（响应侧 chunked），结束时补 trailer。
 	asio::awaitable<void> stream(Get<"/stream"> req, pylai::http::UnknownLengthResponse& res);
+
+	// 用 asio 的**组合操作**读体（两个通道满足 AsyncReadStream / AsyncWriteStream，见 tests/stream_concepts.cpp）。
+	asio::awaitable<void> count_body(Post<"/count"> req, pylai::http::StringResponse& res);
 };
 
 asio::awaitable<void> App::health(Get<"/health">, pylai::http::StringResponse& res)
@@ -102,6 +105,17 @@ asio::awaitable<void> App::stream(Get<"/stream">, pylai::http::UnknownLengthResp
 	co_await res.finish(trailers);
 }
 
+// 用 asio 的组合操作读体：动态缓冲会一直长到 **eof**（= 请求体到尾，由门面把内部的 0 翻译过来）。
+asio::awaitable<void> App::count_body(Post<"/count"> req, pylai::http::StringResponse& res)
+{
+	std::vector<std::byte> body;
+	const auto [ec, n] = co_await asio::async_read(
+		req, asio::dynamic_buffer(body), asio::as_tuple(asio::use_awaitable)
+	);
+	(void)n;
+	co_await res.body(fmt::format("count={} eof={}\n", body.size(), ec == asio::error::eof)).flush();
+}
+
 } // namespace
 
 int main()
@@ -114,7 +128,7 @@ int main()
 			                  .max_body_bytes(1024) // 让 e2e 用 1 KiB 就能试到 413
 			                  .route_on(&app, &App::health, &App::user, &App::submit, &App::list_items,
 			                            &App::create_item, &App::both, &App::both_head, &App::echo_body, &App::peek_body,
-			                            &App::stream)
+			                            &App::stream, &App::count_body)
 		                  .build();
 		return server.run();
 	}

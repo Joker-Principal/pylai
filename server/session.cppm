@@ -27,10 +27,12 @@ public:
 
 	// http::BodyReader：把下一段体交给 handler（实现见 session.cpp）。
 	[[nodiscard]] asio::awaitable<std::size_t> read_some(std::span<std::byte> out) override;
-	[[nodiscard]] bool exhausted() const noexcept override { return body_finished; }
 
 	// http::ResponseWriter：带超时写一段字节（实现见 session.cpp）。空 error_code = 成功。
 	[[nodiscard]] asio::awaitable<std::error_code> write(std::span<const std::byte> bytes) override;
+
+	// http::BodyReader / http::ResponseWriter：两侧的字节通道。
+	[[nodiscard]] asio::any_io_executor get_executor() noexcept override { return socket.get_executor(); }
 
 	// 响应类型在**发响应头之前**读这两个值（头一写出去就冻结 / HEAD 抑制正文）。
 	[[nodiscard]] bool keep_alive() const noexcept override;

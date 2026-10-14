@@ -411,6 +411,38 @@ std::error_code make_error_code(WriteErrc value) noexcept
 	return {static_cast<int>(value), write_category()};
 }
 
+namespace {
+
+class BodyCategoryImpl : public std::error_category
+{
+public:
+	[[nodiscard]] const char* name() const noexcept override { return "pylai.http.body"; }
+
+	[[nodiscard]] std::string message(int code) const override
+	{
+		switch(static_cast<BodyErrc>(code))
+		{
+			case BodyErrc::closed: return "connection closed before the body ended";
+			case BodyErrc::too_large: return "request body exceeds the configured limit";
+			case BodyErrc::bad_request: return "malformed request body";
+		}
+		return "unknown body error";
+	}
+};
+
+} // namespace
+
+const std::error_category& body_category() noexcept
+{
+	static const BodyCategoryImpl instance;
+	return instance;
+}
+
+std::error_code make_error_code(BodyErrc value) noexcept
+{
+	return {static_cast<int>(value), body_category()};
+}
+
 void throw_out_of_order(std::string_view action)
 {
 	throw std::logic_error{

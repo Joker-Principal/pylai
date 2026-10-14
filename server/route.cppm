@@ -775,6 +775,15 @@ struct Request
 	[[nodiscard]] asio::awaitable<std::vector<std::byte>> body() const { co_return co_await raw.body(); }
 	asio::awaitable<std::size_t> read_some(std::span<std::byte> out) const { co_return co_await raw.read_some(out); }
 
+	// 转发读通道 ⇒ 拿着 handler 里的 `req` 就能用 asio 的组合操作（`asio::async_read` …）。
+	using executor_type = asio::any_io_executor;
+	[[nodiscard]] executor_type get_executor() const noexcept { return raw.get_executor(); }
+	template <typename MutableBufferSequence, typename CompletionToken>
+	auto async_read_some(const MutableBufferSequence& buffers, CompletionToken&& token) const
+	{
+		return raw.async_read_some(buffers, std::forward<CompletionToken>(token));
+	}
+
 	// 按名字取命名捕获 —— 名字在**编译期**对着 pattern 校对（写错就编不过）。
 	// 整数走 `from_chars`（与旧的位置注入同语义：转换失败静默给 0）；string_view 直通。
 	template <class T, FixedString name>
@@ -1079,10 +1088,10 @@ struct VerbRoutes
 template <Verb verb, class C, class... Pmf>
 void add_verb_routes(std::vector<VerbRoutes>& routes, C* self, Pmf... pmf)
 {
-	using patterns = typename SelectPatterns<verb, Pmf...>::type;
-	if constexpr(!IsEmptyPatternList<patterns>::value)
+	using Patterns = typename SelectPatterns<verb, Pmf...>::type;
+	if constexpr(!IsEmptyPatternList<Patterns>::value)
 	{
-		static constexpr auto tree = build_of(patterns{});
+		static constexpr auto tree = build_of(Patterns{});
 		auto slots = select_slots<verb>(self, std::tuple{pmf...}, std::index_sequence_for<Pmf...>{});
 
 		routes.push_back(VerbRoutes{

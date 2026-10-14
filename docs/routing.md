@@ -72,6 +72,9 @@ auto server = pylai::Server::builder()
 > 📌 **“pattern 里的名字没人读”不算错** —— 读取发生在 handler 体内，编译期看不到；这与旧的 `Param<>` 位置注入相比少了一个检查（换来的是错误定位到写的那一行）。
 
 > ✅ **体由 handler 自己拉**（框架读到 headers 就交棒）：`co_await req.body()` 或 `co_await req.read_some(buf)`。
+> 两侧通道都满足 asio 的流概念（读 `AsyncReadStream` / 写 `AsyncWriteStream`）⇒ handler 里可以**直接用组合操作**：
+> `asio::async_read(req, …)` · `asio::async_read_until(req, …)` · `asio::streambuf` · `asio::async_write(…, …)` 那一套。
+> 注意语义：读侧“体到尾”在门面处就是 asio 的 **`eof`**（`ec == asio::error::eof` 表示正常读完，不是失败）。
 > ⚠️ **没读完的体不会被 drain** —— 响应会带上 `Connection: close` 并关连接（所以“忽略体的 POST”会自动变成一次性连接；读了就没事）。
 
 > ⚠️ **已知缺口**：`param<int, …>()` 用 `std::from_chars` 转换，**失败时静默取 0**（`/users/abc` → `id == 0`）。
