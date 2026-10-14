@@ -123,7 +123,7 @@ asio::awaitable<void> Session::reply_error(int status)
 {
 	want_keep_alive = false;
 
-	http::StringResponse response;
+	route::StringResponse response;
 	response.attach(ctx, *this);
 	response.status(status);
 	co_await response.finish();

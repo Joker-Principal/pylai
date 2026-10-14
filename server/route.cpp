@@ -24,17 +24,17 @@ namespace {
 
 // 字节版；文本写法另给 `string_view` 重载（与 `res.body(…)` 同一个策略）。
 // ⚠️ 状态住在 Context 里 ⇒ 必须**先 attach 再配置**（框架造响应一律这个次序）。
-[[nodiscard]] http::StringResponse text_response(
+[[nodiscard]] StringResponse text_response(
 	http::Context& ctx, http::ResponseWriter& writer, int status, std::span<const std::byte> body
 )
 {
-	http::StringResponse response;
+	StringResponse response;
 	response.attach(ctx, writer);
 	response.status(status).body(body);
 	return response;
 }
 
-[[nodiscard]] http::StringResponse text_response(
+[[nodiscard]] StringResponse text_response(
 	http::Context& ctx, http::ResponseWriter& writer, int status, std::string_view body
 )
 {
@@ -107,7 +107,7 @@ asio::awaitable<void> Router::dispatch(
 
 	if(request.method == "OPTIONS")
 	{
-		http::EmptyResponse response;
+		EmptyResponse response;
 		response.attach(ctx, writer);
 		response.header("Allow", allow);
 		co_await response.finish();
@@ -117,6 +117,86 @@ asio::awaitable<void> Router::dispatch(
 	auto response = text_response(ctx, writer, 405, "405 Method Not Allowed\n");
 	response.header("Allow", allow);
 	co_await response.finish();
+}
+
+// ═══ 响应门面的出网实现 ═══
+// 状态全在 `http::Context` 里；这里只做“把状态按 framing 策略发给写通道”。
+// ⚠️ HEAD 的正文抑制（`head_only()`）与“头一发就冻结 keep_alive”都在写通道实现侧。
+
+asio::awaitable<std::error_code> StringResponse::flush()
+{
+	auto& s = state();
+	if(s.stage == http::Stage::finished) co_return std::error_code{};
+	require_writer();
+
+	if(s.stage == http::Stage::config)
+	{
+		const auto ec = co_await send_head(std::uint64_t{s.pending.size()}, false);
+		if(ec) co_return ec;
+	}
+
+	// HEAD 照发头（`Content-Length` 按 GET 的体算），正文由这里抑制（RFC 9110 §9.3.2）。
+	if(out_->head_only() || s.pending.empty())
+	{
+		s.stage = http::Stage::finished;
+		co_return std::error_code{};
+	}
+
+	const auto ec = co_await out_->write(s.pending);
+	if(!ec) s.stage = http::Stage::finished;
+	co_return ec;
+}
+
+asio::awaitable<std::error_code> EmptyResponse::flush()
+{
+	auto& s = state();
+	if(s.stage == http::Stage::finished) co_return std::error_code{};
+
+	// 204 / 304 / 1xx 是“无内容”，不得带 Content-Length（RFC 9110 §8.6）；
+	// 其它状态码只是“零长度内容”，必须写 Content-Length: 0 才能定界。
+	const bool no_content = s.status == 204 || s.status == 304 || (s.status >= 100 && s.status < 200);
+	const auto ec = co_await send_head(no_content ? std::nullopt : std::optional<std::uint64_t>{0}, false);
+	if(!ec) s.stage = http::Stage::finished;
+	co_return ec;
+}
+
+asio::awaitable<std::error_code> UnknownLengthResponse::flush()
+{
+	auto& s = state();
+	if(s.stage == http::Stage::finished) co_return std::error_code{};
+	require_writer();
+
+	if(s.stage == http::Stage::config)
+	{
+		const auto ec = co_await send_head(std::nullopt, true);
+		if(ec) co_return ec;
+	}
+
+	// 空载荷不产生块："0\r\n\r\n" 是终止块，不是“空块”—— 那是 finish() 的事。
+	if(s.pending.empty() || out_->head_only()) co_return std::error_code{};
+
+	const auto ec = co_await out_->write(http::chunk_bytes(s.pending));
+	s.pending.clear();
+	co_return ec;
+}
+
+asio::awaitable<std::error_code> UnknownLengthResponse::finish(std::span<const http::Header> trailers)
+{
+	auto& s = state();
+	if(s.stage == http::Stage::finished) co_return std::error_code{};
+
+	const auto flushed = co_await flush();
+	if(flushed) co_return flushed;
+
+	if(out_->head_only()) // HEAD：不应有体，也不发终止块
+	{
+		s.stage = http::Stage::finished;
+		co_return std::error_code{};
+	}
+
+	const auto ec = co_await out_->write(http::last_chunk_bytes(trailers));
+	if(!ec) s.stage = http::Stage::finished;
+	co_return ec;
 }
 
 } // namespace pylai::route

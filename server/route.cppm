@@ -2,12 +2,17 @@ module;
 
 #include <array>
 #include <charconv>
+#include <concepts>
 #include <coroutine>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <span>
+#include <stdexcept>
+#include <string>
 #include <string_view>
+#include <system_error>
 #include <tuple>
 #include <type_traits>
 #include <utility>
@@ -846,6 +851,206 @@ using Options = Request<Verb::options, pattern>;
 export template <FixedString pattern>
 using Patch = Request<Verb::patch, pattern>;
 
+// ═══ 响应侧：给 handler 用的门面 ═══
+// ⚠️ 状态**不在**响应对象里 —— 它们在 `http::Context`（每请求一份，可复用）；
+//    这里只是它的一个**薄视图** + 写通道的入口（什么时候写出去由 handler / 类型自己定）。
+//    三种类型 = 三种 framing 策略；链式 setter 返回具体类型（CRTP），所以能混着链。
+
+// 响应侧的门面：状态住在 `http::Context` 里，这里只做“读写状态 + 发到通道”。
+// ⚠️ 链式 setter 用 **deducing this**（C++23 显式对象参数）：`this Self&& self` 推导出具体类型，
+//    返回 `self` 就是“返回具体类型” ⇒ 于是**不需要 CRTP**，三个响应类型只需单继承。
+export class ResponseCore
+{
+public:
+	ResponseCore(const ResponseCore&) = delete;
+	ResponseCore& operator=(const ResponseCore&) = delete;
+	ResponseCore(ResponseCore&&) noexcept = default;
+	ResponseCore& operator=(ResponseCore&&) noexcept = default;
+
+	[[nodiscard]] int status() const { return state().status; }
+	[[nodiscard]] std::string_view content_type() const { return state().content_type; }
+	[[nodiscard]] std::span<const http::Header> headers() const { return state().headers; }
+
+	template <typename Self>
+	auto&& status(this Self&& self, int code)
+	{
+		self.require_config("status");
+		self.state().status = code;
+		return std::forward<Self>(self);
+	}
+
+	template <typename Self>
+	auto&& content_type(this Self&& self, std::string_view value)
+	{
+		self.require_config("content_type");
+		self.state().content_type = value;
+		return std::forward<Self>(self);
+	}
+
+	template <typename Self>
+	auto&& header(this Self&& self, std::string_view name, std::string_view value)
+	{
+		self.require_config("header");
+		self.state().headers.push_back({std::string{name}, std::string{value}});
+		return std::forward<Self>(self);
+	}
+
+	// 预告尾部要补哪些字段（只对 chunked 有意义；SHOULD 预告 —— RFC 9110 §6.6.2）。
+	template <typename Self>
+	auto&& trailer(this Self&& self, std::string_view name)
+	{
+		self.require_config("trailer");
+		self.state().trailer_names.emplace_back(name);
+		return std::forward<Self>(self);
+	}
+
+	// 框架在调 handler 之前注入：状态的家（`Context`）+ 写通道。
+	// ⚠️ 顺带把上一次请求的响应状态清干净（Context 跨请求复用）⇒ **配置必须在 attach 之后**。
+	// 用显式对象参数是为了让 `self.apply_defaults()` 落到**具体类型**那份（基类只留个空实现）。
+	template <typename Self>
+	void attach(this Self&& self, http::Context& context, http::ResponseWriter& writer) noexcept
+	{
+		self.ctx_ = &context;
+		self.out_ = &writer;
+		context.response().reset();
+		self.apply_defaults();
+	}
+
+	// 各响应类型的初始状态（`EmptyResponse` 默认 204、文本类型默认 `text/plain` …）；框架 attach 时叫它。
+	void apply_defaults() noexcept {}
+
+protected:
+	ResponseCore() = default;
+
+	// 状态就在 `http::Context` 里 —— 响应对象只是它的一个薄门面。
+	[[nodiscard]] http::ResponseState& state()
+	{
+		if(ctx_ == nullptr) throw std::logic_error{"响应状态还没就位：只能由框架 attach(Context&, ResponseWriter&) 之后用"};
+		return ctx_->response();
+	}
+
+	[[nodiscard]] const http::ResponseState& state() const
+	{
+		if(ctx_ == nullptr) throw std::logic_error{"响应状态还没就位：只能由框架 attach(Context&, ResponseWriter&) 之后用"};
+		return ctx_->response();
+	}
+
+	void require_config(std::string_view action) const
+	{
+		if(state().stage != http::Stage::config) http::throw_out_of_order(action);
+	}
+
+	void require_writer() const
+	{
+		if(out_ == nullptr) throw std::logic_error{"响应写通道未注入（只能由框架在调 handler 之前 attach）"};
+	}
+
+	// 把响应头发出去；framing 由派生类型给（成帧是协议知识，所以调 `:http` 的纯函数）。成功 ⇒ head_sent。
+	asio::awaitable<std::error_code> send_head(std::optional<std::uint64_t> content_length, bool chunked)
+	{
+		require_writer();
+		auto& s = state();
+
+		std::vector<http::Header> hint; // `Trailer:` 预告只要名字，值在末块之后补
+		hint.reserve(s.trailer_names.size());
+		for(const std::string& name : s.trailer_names) hint.push_back({name, {}});
+
+		const auto head = http::head_bytes(
+			s.status, s.content_type, s.headers, content_length, chunked, out_->keep_alive(), hint
+		);
+		const auto ec = co_await out_->write(std::as_bytes(std::span{head}));
+		if(!ec) s.stage = http::Stage::head_sent;
+		co_return ec;
+	}
+
+protected:
+	// 成员放末尾；派生类型（`StringResponse::flush` 等）要直接用它发头 / 发体 ⇒ protected 而非 private。
+	http::Context* ctx_{nullptr};		   // 状态的家（框架 attach 时给）
+	http::ResponseWriter* out_{nullptr}; // 写通道（同上）
+};
+
+// 有体的响应：`body(块)` 只往内存追加，出网是 flush / finish 的事。
+// 文本写法另给 `string_view` 重载；streaming = false 时头一发出就不许再追加。
+export template <bool streaming>
+class BodyResponse : public ResponseCore
+{
+public:
+	template <typename Self>
+	auto&& body(this Self&& self, std::span<const std::byte> data)
+	{
+		self.require_appendable();
+		auto& pending = self.state().pending;
+		pending.insert(pending.end(), data.begin(), data.end());
+		return std::forward<Self>(self);
+	}
+
+	// 文本当体（`res.body("ok\n")` 走这个，零拷贝）。
+	template <typename Self>
+	auto&& body(this Self&& self, std::string_view text)
+	{
+		return std::forward<Self>(self).body(std::as_bytes(std::span{text}));
+	}
+
+	// 还没发出去的体（定长类型 = 整个体）。
+	[[nodiscard]] std::span<const std::byte> body() const { return state().pending; }
+
+protected:
+	BodyResponse() = default;
+
+private:
+	void require_appendable() const
+	{
+		if constexpr(streaming)
+		{
+			if(state().stage == http::Stage::finished) http::throw_out_of_order("body");
+		}
+		else
+		{
+			require_config("body");
+		}
+	}
+};
+
+// 有体、长度已知：长度就是 `body()` 攒下的字节数 ⇒ `Content-Length` 定界。
+export struct StringResponse : BodyResponse<false>
+{
+	void apply_defaults() noexcept { state().content_type = "text/plain; charset=utf-8"; }
+
+	// flush：发头 + 发体（HEAD 只发头）。定长体一次性发完 ⇒ flush 即收尾。
+	asio::awaitable<std::error_code> flush();
+	// 收尾（= flush，幂等）：给框架兜底与推式响应一个统一的形状。
+	asio::awaitable<std::error_code> finish() { return flush(); }
+};
+
+// 无体响应。⚠️ 刻意**没有** `body(…)` —— 无体响应不接受体（编译期拦）。
+// 204 / 304 / 1xx 不得带 `Content-Length`（RFC 9110 §8.6）；其它状态码要 `Content-Length: 0` 才能定界。
+export struct EmptyResponse : ResponseCore
+{
+	void apply_defaults() noexcept { state().status = 204; }
+
+	asio::awaitable<std::error_code> flush();
+	asio::awaitable<std::error_code> finish() { return flush(); }
+};
+
+// 长度未知 ⇒ 响应侧 chunked：`body(块)` 攒进内存，`flush()` 的时候才作为一个块推出去。
+export struct UnknownLengthResponse : BodyResponse<true>
+{
+	void apply_defaults() noexcept { state().content_type = "text/plain; charset=utf-8"; }
+
+	// flush：头没发就先发头，然后把攒着的字节作为一个块发出去。
+	asio::awaitable<std::error_code> flush();
+	// 收尾：flush + 末块 + trailer（幂等）。handler 不调的话由框架兜底。
+	asio::awaitable<std::error_code> finish(std::span<const http::Header> trailers = {});
+};
+
+// 响应类型的判据（`make_arg` 据此区分“请求形参”与“响应形参”）：
+// 框架要能给它注入 Context + 写通道、能兜底收尾。
+export template <typename T>
+concept IsResponse = requires(T& response, http::Context& context, http::ResponseWriter& writer) {
+	{ response.attach(context, writer) } -> std::same_as<void>;
+	{ response.finish() } -> std::same_as<asio::awaitable<std::error_code>>;
+};
+
 // 形参类型分类（`make_arg` 与编译期诊断用）
 template <class>
 struct IsRouteRequest : std::false_type
@@ -979,7 +1184,7 @@ constexpr void validate_group() noexcept
 
 // 造一个注入实参，按形参类型分两类：
 //   `Get<…>` 这类请求类型 → 包一份请求（报文数据 + 读通道 + 本次捕获；路径参数由 handler 用 `req.param<…>()` 自取）
-//   响应类型（`http::IsResponse`）→ 框架持有的响应对象，handler 往它里面填 / 推
+//   响应类型（`IsResponse`）→ 框架持有的响应对象，handler 往它里面填 / 推
 template <std::size_t index, class Pmf, class Response>
 [[nodiscard]] decltype(auto) make_arg(
 	http::Context& ctx, http::BodyReader& in, Response& response, std::span<const Capture> captures
@@ -992,13 +1197,13 @@ template <std::size_t index, class Pmf, class Response>
 	{
 		return P{ctx.request(), captures, &in};
 	}
-	else if constexpr(http::IsResponse<std::remove_cvref_t<P>>)
+	else if constexpr(IsResponse<std::remove_cvref_t<P>>)
 	{
 		return response;
 	}
 	else
 	{
-		static_assert(!sizeof(P), "路由注入：形参只能是 Get<…>（第 0 个）/ 响应类型（http::StringResponse& / EmptyResponse& / UnknownLengthResponse&）");
+		static_assert(!sizeof(P), "路由注入：形参只能是 Get<…>（第 0 个）/ 响应类型（StringResponse& / EmptyResponse& / UnknownLengthResponse&）");
 	}
 }
 
@@ -1010,7 +1215,7 @@ template <class Params, std::size_t index = 0>
 	{
 		return index;
 	}
-	else if constexpr(http::IsResponse<std::remove_cvref_t<typename Params::template At<index>>>)
+	else if constexpr(IsResponse<std::remove_cvref_t<typename Params::template At<index>>>)
 	{
 		return index;
 	}
@@ -1029,7 +1234,7 @@ template <class C, class F, std::size_t... indices>
 	static constexpr std::size_t response_slot = response_index<Params>();
 	static_assert(
 		response_slot < Params::size(),
-		"路由 handler 必须有一个响应形参：http::StringResponse& / http::EmptyResponse& / http::UnknownLengthResponse&"
+		"路由 handler 必须有一个响应形参：StringResponse& / EmptyResponse& / UnknownLengthResponse&"
 	);
 
 	return [self, pmf](
