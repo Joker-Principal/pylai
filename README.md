@@ -1,6 +1,7 @@
-# asio-module
+# pylai
 
-把 standalone asio 包成 **C++20 modules** 的**薄封装层**；应用（`server/` 里的 HTTP 服务器 `pylai`）在其上实现。
+HTTP 服务器框架（`server/`，静态库 **`pylai`**）；底座是 `standalone/` —— 把 standalone asio 包成 **C++20 modules** 的薄封装。
+（仓库原名 `asio-module`，那时它还只是 asio 的调试场。）
 
 ## 目录地图
 

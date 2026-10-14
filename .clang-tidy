@@ -1,68 +1,41 @@
 ---
-# clang-tidy 配置：命名规范
-#   类 / 类型名 → 大驼峰（PascalCase）；函数 / 变量 → 下划线（snake_case）
-# 只开命名检查；编译类诊断交给构建 / `clice lint`，不在两处重复报同一件事。
-# 选项名与语义依据 upstream 文档（本机 clang-tidy 23.1.1，文档为 24.0.0git）：
-#   https://clang.llvm.org/extra/clang-tidy/checks/readability/identifier-naming.html
-# 该检查只对"配置过的种类"生效；未配置的（命名空间 / 宏 / 枚举值 …）不做检查。
 Checks: '-*,readability-identifier-naming'
 WarningsAsErrors: ''
 FormatStyle: file
 SystemHeaders: false
-
-# ── 扫描范围：只报本工作区自己的源码 ────────────────────────────────
-# clang-tidy 没有"工作区"概念（不支持 ${workspaceFolder} 插值），HeaderFilterRegex 是唯一的
-# 正向白名单，按**全路径正则**匹配；再用 ExcludeHeaderFilterRegex 把生成目录剔掉。
-# 两者要同时给（upstream：exclude-header-filter "必须与 header-filter 同时用"）。
-#
-# ⚠️ 只在"头文件"上生效：**每个 TU 的 main file 的诊断永远显示**。
-#    所以 server/ 下的 .cpp / .cppm（各自是一个 TU 的 main file）不受这两条影响，
-#    即 route.cppm 的 static_assert 与 http.cpp 的命名警告照旧会报 —— 这正是我们要的。
-# ⚠️ 正则用 llvm::Regex：**非锚定**部分匹配，POSIX ERE（不支持 lookahead）。
-# ⚠️ 锚点用的是仓库目录名：把仓库改名 / 移到不含 "asio-module" 的路径后，下面两条要跟着改。
-HeaderFilterRegex: '/asio-module/'
+HeaderFilterRegex: '.*'
 ExcludeHeaderFilterRegex: '/(_deps|vcpkg_installed|build-[^/]*)/'
 
 CheckOptions:
-  # 类 / 类型名 → 大驼峰
   - {key: readability-identifier-naming.ClassCase,             value: CamelCase}
   - {key: readability-identifier-naming.StructCase,            value: CamelCase}
   - {key: readability-identifier-naming.UnionCase,             value: CamelCase}
   - {key: readability-identifier-naming.EnumCase,              value: CamelCase}
-  - {key: readability-identifier-naming.TypeAliasCase,         value: CamelCase}
-  # `coroutine_traits` 里的 `promise_type` 是标准强制的名字（协程机制按名查找），只能豁免
-  - {key: readability-identifier-naming.TypeAliasIgnoredRegexp, value: '^promise_type$'}
   - {key: readability-identifier-naming.TypedefCase,           value: CamelCase}
+  - {key: readability-identifier-naming.TypeAliasCase,         value: CamelCase}
+  - {key: readability-identifier-naming.TypeAliasIgnoredRegexp, value: '^promise_type$'}
+  - {key: readability-identifier-naming.TypeAliasIgnoredRegexp, value: '^type$'}
 
-  # 模板参数 —— 类型 / 模板模板 / 通用 → 大驼峰；非类型（值）→ 下划线。
-  # 这三类键互相独立，未配置的专用键回退到通用键（upstream：rules are falling back to a more
-  # generic rule if the specific case is not configured），所以四行都要写全。
-  # ⚠️ 类型参数的正确键名是 TypeTemplateParameterCase；写成 TemplateTypeParameterCase
-  #    既不报错也不生效（本机 23.1.1 实测静默忽略）。
   - {key: readability-identifier-naming.TemplateParameterCase,         value: CamelCase}
   - {key: readability-identifier-naming.TypeTemplateParameterCase,     value: CamelCase}
   - {key: readability-identifier-naming.TemplateTemplateParameterCase, value: CamelCase}
   - {key: readability-identifier-naming.ValueTemplateParameterCase,    value: lower_case}
 
-  # 函数 / 方法 → 下划线
   - {key: readability-identifier-naming.FunctionCase, value: lower_case}
   - {key: readability-identifier-naming.MethodCase,   value: lower_case}
 
-  # 变量 → 下划线
   - {key: readability-identifier-naming.VariableCase,       value: lower_case}
   - {key: readability-identifier-naming.LocalVariableCase,  value: lower_case}
   - {key: readability-identifier-naming.GlobalVariableCase, value: lower_case}
   - {key: readability-identifier-naming.StaticVariableCase, value: lower_case}
   - {key: readability-identifier-naming.ParameterCase,      value: lower_case}
 
-  # 成员 → 下划线（含成员常量；私有 / 保护 / 公有各自是一类）
   - {key: readability-identifier-naming.MemberCase,          value: lower_case}
   - {key: readability-identifier-naming.PrivateMemberCase,   value: lower_case}
   - {key: readability-identifier-naming.ProtectedMemberCase, value: lower_case}
   - {key: readability-identifier-naming.PublicMemberCase,    value: lower_case}
   - {key: readability-identifier-naming.ConstantMemberCase,  value: lower_case}
 
-  # 常量 / constexpr → 下划线（仓库既有风格：k_no_route 等）
   - {key: readability-identifier-naming.ConstantCase,                value: lower_case}
   - {key: readability-identifier-naming.LocalConstantCase,           value: lower_case}
   - {key: readability-identifier-naming.GlobalConstantCase,          value: lower_case}
