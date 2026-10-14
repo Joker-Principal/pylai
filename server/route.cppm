@@ -19,12 +19,12 @@ import asio;
 import jk;
 import :http;
 
-export namespace pylai::route {
+// ⚠️ 导出面 = **只给使用者**：声明 DSL（`Verb` / `Request` / 动词别名 / `Pattern` / `ParseError`）。
+// 其余（树、建树器、匹配器、`FixedString` / `Segment` / `Capture`、注册与派发接线）
+// 一律**不导出** —— 同模块的其他 TU（`route.cpp` / `server.cppm` / `session.cppm` / `route.checks.cpp`）照样看得见。
+namespace pylai::route {
 
-// handler 的类型擦除边界。⚠️这里只能出现**非模板**类型（请求 + 写通道）。
-using Handler = std::function<asio::awaitable<void>(const http::Request&, http::ResponseWriter&)>;
-
-// 每个出现过的动词一张路由表（树 + 槽位表）。
+// 每个出现过的动词**一处**类型擦除单元（树 + 具体类型的槽位表，定义在后半）。
 struct VerbRoutes;
 
 class Router
@@ -128,7 +128,7 @@ struct PatternView
 	std::string_view raw{}; // 原始 pattern，字符片段的 label 就切它（静态存储，零拷贝）
 };
 
-enum class ParseError : std::uint8_t
+export enum class ParseError : std::uint8_t
 {
 	none = 0,
 	must_start_with_slash,
@@ -140,7 +140,7 @@ enum class ParseError : std::uint8_t
 	duplicate_param,
 };
 
-[[nodiscard]] constexpr const char* to_string(ParseError e) noexcept
+export [[nodiscard]] constexpr const char* to_string(ParseError e) noexcept
 {
 	switch (e)
 	{
@@ -156,7 +156,7 @@ enum class ParseError : std::uint8_t
 	return "?";
 }
 
-template <FixedString s>
+export template <FixedString s>
 struct Pattern
 {
 	static constexpr std::string_view raw = s.view();
@@ -716,7 +716,7 @@ template <std::size_t node_capacity>
 // ═══ 路由声明 DSL：动词 + 路径住在**第一个形参** ═══
 // 用法见 `docs/routing.md`；这里只有一条契约：第一个形参既是路由声明、也是本次的请求。
 
-enum class Verb : std::uint8_t
+export enum class Verb : std::uint8_t
 {
 	get,
 	post,
@@ -743,7 +743,7 @@ enum class Verb : std::uint8_t
 }
 
 // 一条路由的请求：既是**路由声明**（verb + pattern 在编译期），也带**本次请求的数据**。
-template <Verb verb, FixedString pattern>
+export template <Verb verb, FixedString pattern>
 struct Request
 {
 	static constexpr Verb method = verb;
@@ -761,8 +761,14 @@ struct Request
 		return names.size();
 	}
 
+	// 框架专用（`make_arg` 调它）；用户不要直接构造。
+	// `constexpr` 是为了让编译期自检能直接构造一个请求对象（见 `server/route.checks.cpp`）。
+	constexpr Request(const http::Request& raw, std::span<const Capture> captures) noexcept :
+		raw(raw),
+		captures_(captures)
+	{}
+
 	const http::Request& raw; // 框架解析出来的 start line + headers
-	std::span<const Capture> captures; // 本次匹配出的命名捕获，生存期覆盖 handler 执行期间
 
 	// 读本请求的体（接口挂在请求本身上）。
 	// ⚠️ 体是**字节**：要文本语义得自己 `http::as_text(...)`。
@@ -777,7 +783,7 @@ struct Request
 		constexpr std::size_t slot = slot_of(name.view());
 		static_assert(slot < Pattern<pattern>{}.params().size(), "路由声明：路径里没有这个名字的命名捕获");
 
-		const std::string_view text = slot < captures.size() ? captures[slot].value : std::string_view{};
+		const std::string_view text = slot < captures_.size() ? captures_[slot].value : std::string_view{};
 
 		if constexpr(std::is_same_v<T, std::string_view>)
 		{
@@ -794,21 +800,24 @@ struct Request
 			static_assert(!sizeof(T), "路由注入：param<> 目前只支持整数与 string_view");
 		}
 	}
+
+private:
+	std::span<const Capture> captures_{}; // 本次匹配出的命名捕获，生存期覆盖 handler 执行期间
 };
 
-template <FixedString pattern>
+export template <FixedString pattern>
 using Get = Request<Verb::get, pattern>;
-template <FixedString pattern>
+export template <FixedString pattern>
 using Post = Request<Verb::post, pattern>;
-template <FixedString pattern>
+export template <FixedString pattern>
 using Put = Request<Verb::put, pattern>;
-template <FixedString pattern>
+export template <FixedString pattern>
 using Delete = Request<Verb::del, pattern>;
-template <FixedString pattern>
+export template <FixedString pattern>
 using Head = Request<Verb::head, pattern>;
-template <FixedString pattern>
+export template <FixedString pattern>
 using Options = Request<Verb::options, pattern>;
-template <FixedString pattern>
+export template <FixedString pattern>
 using Patch = Request<Verb::patch, pattern>;
 
 // 形参类型分类（`make_arg` 与编译期诊断用）
@@ -985,10 +994,10 @@ template <class Params, std::size_t index = 0>
 	}
 }
 
-// 把成员函数指针包成 Handler：按自己的 pattern 匹配出捕获，再按形参表逐个造实参。
-// 组的树只给出槽位，而擦除后的 `Handler` 没有携带捕获的通道 → 这里必须按本条 pattern 再匹配一次拿捕获。
+// 一条路由的调用器：**不擦除**（具体到 `C*` + 成员指针），捕获由匹配那一步传进来。
+// 形参表里的响应类型在这里被静态确定 ⇒ 响应对象直接构造在协程帧上。
 template <class C, class F, std::size_t... indices>
-[[nodiscard]] Handler make_handler(C* self, F pmf, std::index_sequence<indices...>)
+[[nodiscard]] auto make_slot(C* self, F pmf, std::index_sequence<indices...>)
 {
 	using Params = typename RouteOf<F>::Params;
 	static constexpr std::size_t response_slot = response_index<Params>();
@@ -997,19 +1006,9 @@ template <class C, class F, std::size_t... indices>
 		"路由 handler 必须有一个响应形参：http::StringResponse& / http::EmptyResponse& / http::UnknownLengthResponse&"
 	);
 
-	return [self, pmf](const http::Request& request, http::ResponseWriter& writer) -> asio::awaitable<void> {
-		static constexpr auto tree = build<RouteOf<F>::pattern>();
-
-		std::vector<Capture> captures;
-		if(match(tree, request.path, captures) == k_no_route)
-		{
-			http::StringResponse fallback;
-			fallback.attach(writer);
-			fallback.status(500).body("路由派发：组命中但单条 pattern 未命中\n");
-			co_await fallback.finish();
-			co_return;
-		}
-
+	return [self, pmf](
+			   const http::Request& request, http::ResponseWriter& writer, std::span<const Capture> captures
+		   ) -> asio::awaitable<void> {
 		using Response = std::remove_cvref_t<typename Params::template At<response_slot>>;
 		Response response;
 		response.attach(writer); // 框架只逆写通道，之后什么时候写由 handler / 响应类型定
@@ -1018,32 +1017,64 @@ template <class C, class F, std::size_t... indices>
 	};
 }
 
-// 一个动词下的路由：一棵该动词的编译期树 + 与之按槽位对齐的 handler 表。
-// 动词必须分开建树：树只由 pattern 决定、动词不参与 —— 混在一棵树里的话
+// 挑出属于 `verb` 的槽位，按注册顺序拼成一个 tuple（顺带就是"只留该动词"的过滤）。
+// 返回类型随谓词逐项变化 ⇒ 用 `if constexpr` 分两支，`tuple_cat` 把空 tuple 吃掉。
+template <Verb verb, std::size_t i, class C, class... Pmf>
+[[nodiscard]] auto select_slot(C* self, const std::tuple<Pmf...>& table)
+{
+	using F = std::tuple_element_t<i, std::tuple<Pmf...>>;
+	if constexpr(RouteOf<F>::verb == verb)
+	{
+		return std::tuple{make_slot(
+			self, std::get<i>(table), std::make_index_sequence<RouteOf<F>::Params::size()>{}
+		)};
+	}
+	else
+	{
+		return std::tuple{};
+	}
+}
+
+template <Verb verb, class C, class... Pmf, std::size_t... i>
+[[nodiscard]] auto select_slots(C* self, const std::tuple<Pmf...>& table, std::index_sequence<i...>)
+{
+	return std::tuple_cat(select_slot<verb, i>(self, table)...);
+}
+
+// 运行期槽位号 → 编译期下标：顺序比到命中为止。槽位数是每条路由的形参表长度，
+// 个位数 ⇒ 几层 `if` 比一次 `std::function` 虚调用还便宜，而槽位本身**一个都没被擦除**。
+template <std::size_t i, class Slots>
+[[nodiscard]] asio::awaitable<bool> invoke_slot(
+	std::size_t slot, Slots& slots, const http::Request& request, http::ResponseWriter& writer,
+	std::span<const Capture> captures
+)
+{
+	if(slot == i)
+	{
+		co_await std::get<i>(slots)(request, writer, captures);
+		co_return true;
+	}
+	if constexpr(i + 1 < std::tuple_size_v<Slots>)
+	{
+		co_return co_await invoke_slot<i + 1>(slot, slots, request, writer, captures);
+	}
+	co_return false;
+}
+
+// 一个动词 = **一处**擦除单元：内部一棵该动词的编译期树 + 与之按槽位对齐的槽位表，
+// 匹配与调用同一个闭包里（外面只看到"这条路径我认不认"与"认了就调用"两个门面）。
+// ⚠️ 动词必须分开建树：树只由 pattern 决定、动词不参与 —— 混在一棵树里的话
 // `Get<"/x">` 与 `Post<"/x">` 会落到同一节点、互相覆盖槽位（后注册的吃掉先注册的）。
 struct VerbRoutes
 {
 	std::string_view verb;
-	std::function<std::uint32_t(std::string_view, std::vector<Capture>&)> match;
-	std::vector<Handler> handlers;
-};
 
-// 挑出动词为 verb 的 handler；顺序与 SelectPatterns 选出的 pattern 一一对应。
-template <Verb verb, class C, class... Pmf>
-[[nodiscard]] std::vector<Handler> make_verb_handlers(C* self, Pmf... pmf)
-{
-	std::vector<Handler> handlers;
-	handlers.reserve(sizeof...(Pmf));
-	(void)std::initializer_list<int>{
-		(RouteOf<Pmf>::verb == verb ?
-			 (handlers.push_back(
-				  make_handler(self, pmf, std::make_index_sequence<RouteOf<Pmf>::Params::size()>{})
-			  ),
-			  0) :
-			 0)...
-	};
-	return handlers;
-}
+	// 纯判定（405 / OPTIONS 的慢路径用）：这条路径在本动词下有没有路由。
+	std::function<bool(std::string_view path)> matched;
+
+	// 命中就调用；false = 这条路径在本动词下不存在（由调用方决定回 405 还是 404）。
+	std::function<asio::awaitable<bool>(const http::Request&, http::ResponseWriter&)> invoke;
+};
 
 template <Verb verb, class C, class... Pmf>
 void add_verb_routes(std::vector<VerbRoutes>& routes, C* self, Pmf... pmf)
@@ -1052,10 +1083,23 @@ void add_verb_routes(std::vector<VerbRoutes>& routes, C* self, Pmf... pmf)
 	if constexpr(!IsEmptyPatternList<patterns>::value)
 	{
 		static constexpr auto tree = build_of(patterns{});
-		routes.push_back(
-			VerbRoutes{to_string(verb), [](std::string_view path, std::vector<Capture>& out) { return match(tree, path, out); },
-					   make_verb_handlers<verb>(self, pmf...)}
-		);
+		auto slots = select_slots<verb>(self, std::tuple{pmf...}, std::index_sequence_for<Pmf...>{});
+
+		routes.push_back(VerbRoutes{
+			to_string(verb),
+			[](std::string_view path) {
+				std::vector<Capture> scratch;
+				return match(tree, path, scratch) != k_no_route;
+			},
+			[slots = std::move(slots)](
+				const http::Request& request, http::ResponseWriter& writer
+			) -> asio::awaitable<bool> {
+				std::vector<Capture> captures;
+				const std::uint32_t slot = match(tree, request.path, captures);
+				if(slot == k_no_route) co_return false;
+				co_return co_await invoke_slot<0>(slot, slots, request, writer, captures);
+			}
+		});
 	}
 }
 

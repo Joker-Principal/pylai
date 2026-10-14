@@ -40,12 +40,11 @@ namespace {
 [[nodiscard]] std::string allowed_methods(const std::vector<VerbRoutes>& methods, std::string_view path)
 {
 	std::vector<std::string_view> verbs;
-	std::vector<Capture> scratch;
 	bool has_head = false;
 
 	for(const VerbRoutes& route : methods)
 	{
-		if(route.match(path, scratch) == k_no_route) continue;
+		if(!route.matched(path)) continue;
 
 		if(route.verb == "HEAD") has_head = true;
 		verbs.push_back(route.verb);
@@ -70,19 +69,11 @@ void Router::set_routes(std::vector<VerbRoutes> routes) { methods = std::move(ro
 
 asio::awaitable<void> Router::dispatch(const http::Request& request, http::ResponseWriter& writer) const
 {
-	std::vector<Capture> captures;
-
-	// 快路径：只试请求动词那棵树。
+	// 快路径：只试请求动词那个单元（匹配与调用在同一处，命中后捕获直接交给 handler）。
 	for(const VerbRoutes& route : methods)
 	{
 		if(route.verb != request.method) continue;
-
-		const std::uint32_t slot = route.match(request.path, captures);
-		if(slot < route.handlers.size())
-		{
-			co_await route.handlers[slot](request, writer);
-			co_return;
-		}
+		if(co_await route.invoke(request, writer)) co_return;
 	}
 
 	// 没写 `Head<>` 时，HEAD 落到同路径的 GET 上（正文由响应类型按 HEAD 抑制）。
@@ -91,13 +82,7 @@ asio::awaitable<void> Router::dispatch(const http::Request& request, http::Respo
 		for(const VerbRoutes& route : methods)
 		{
 			if(route.verb != "GET") continue;
-
-			const std::uint32_t slot = route.match(request.path, captures);
-			if(slot < route.handlers.size())
-			{
-				co_await route.handlers[slot](request, writer);
-				co_return;
-			}
+			if(co_await route.invoke(request, writer)) co_return;
 		}
 	}
 

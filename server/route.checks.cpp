@@ -1,8 +1,11 @@
-// 路由的**编译期用例**：`static_assert` 每次构建都求值 —— 构建过 = 用例过（证据纪律见 AGENTS.md §2）。
+// 路由的**编译期自检**：`static_assert` 每次构建都求值 —— 构建过 = 用例过（证据纪律见 AGENTS.md §2）。
 //
-// 为什么单独一个文件：用例只走 `import pylai;` 的**导出面**（消费方视角），
-// 顺带验收“该导出的都导出来了”；`server/route.cppm` 里只留框架本身。
+// 为什么住在库里（而不是 `tests/`）：这些断言要看树、建树器、匹配器、`FixedString` 这些**不导出**的内部件
+// （导出面只留使用者需要的东西，见 docs/coding-discipline.md）。导出面另有护栏：`tests/main.cpp` 走
+// `import pylai;` 的公开面 + e2e 全程跑。
 // ⚠️ “必须编不过”的失败路径不在这里 —— 那要靠人工探针（见 docs/http-server-plan.md §11.2）。
+module;
+
 #include <array>
 #include <coroutine>
 #include <cstddef>
@@ -11,8 +14,11 @@
 #include <type_traits>
 #include <vector>
 
+module pylai;
+
 import asio; // DSL 里的 handler 返回 asio::awaitable<void>
-import pylai;
+import :http;
+import :route;
 
 using namespace pylai::route;
 

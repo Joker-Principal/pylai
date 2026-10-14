@@ -20,6 +20,30 @@
 
 ## 阶段 1 · 框架形态定形
 
+- **2026-10-14 · S1-R7 · 收窄 `route` 的导出面；编译期自检搬进模块** ✅ —— 用户：“route 模块 export 太多实现用的符号了，这个机会也顺便修一修，以及这条加入编码纪律”。
+  现状是 `export module pylai:route;` + **`export namespace`** ⇒ 整份 1000 行（`FixedString` / `Segment` / `RadixTree` / `PieceCursor` / `insert_pattern` / `k_no_route` …）全在导出面上。
+  改法：去掉整块导出，**逐个**给公开 API 加 `export` —— 公开面只剩 `Verb` · `Request<verb, pattern>` · 七个动词别名（`Get`/`Post`/`Put`/`Delete`/`Head`/`Options`/`Patch`）· `Pattern<s>` · `ParseError` · `to_string(ParseError)`。
+  同模块的其他 TU（`route.cpp` / `server.cppm` / `session.cppm`）照样看得见内部件 ⇒ **“自己要用”不是导出的理由**。
+  顺带收掉一处数据泄漏：`Request::captures` 从公开成员改成私有，改由**框架专用构造函数**（`constexpr`，编译期自检也要用）注入 ⇒ `Capture` 也不必导出。
+  ⚠️ **连带搬迁**：`tests/route_static.cpp`（99 条 `static_assert`）**搬成 `server/route.checks.cpp`** ——
+  它是 `pylai` 的**实现单元**（`module pylai;`），因为那些断言要看树 / 建树器 / 匹配器这些**不导出**的内部件。
+  代价：原来那条“只走导出面 ⇒ 顺带验收该导出的都导出了”的护栏消失；补偿是 `tests/main.cpp` 这个真 app 仍走 `import pylai;` 的公开面 + e2e 全程跑。
+  验证（可复核）：探针 `tests/export_probe.cpp`（用完即删）从外部 TU 引用 `FixedString` / `build` / `k_no_route`，构建报
+  `declaration of 'FixedString' must be imported from module 'pylai' before it is required` ⇒ **导出面确实收窄了**。
+  构建退出码 0；e2e **29 条一字未改、全过**。规矩写进 `docs/coding-discipline.md` §8（新增一节「模块导出面」）。
+
+- **2026-10-14 · S1-R6 · 擦除点合并：handler 的擦除边界从「每条路由」降到「每个动词」** ✅ —— Stage 1 剩下的第一件结构活。
+  用户选它先于“观测/参数挂点”，理由：挂点的宿主就是 handler 调用链，擦除点不合并就得留两遍。
+  做法（按 §11.2 C 的既定设计）：`VerbRoutes` 从 {`verb`, `match`（一道间接）, `handlers[slot]`（又一道间接）} 变成
+  **{`verb`, `matched`（纯判定，供 405/OPTIONS）, `invoke`（命中就调用）}**；内部是**一棵该动词的 `constexpr` 树 + 一份具体类型的槽位 tuple**。
+  三个连带结果：① **删掉了 500 兜底** —— 原先每组一个 `Handler`、各自建一棵单条 pattern 的树，于是“组树命中但单条未命中”理论上可能；现在组与单条用的是**同一个**树对象，这种不一致根本不存在了。
+  ② **去掉了“再匹配一次”** —— 捕获现在作为参数交给槽位（运行期槽位号 → 编译期下标用 `invoke_slot<i>` 顺序比到命中，槽位本身一个都没被擦除，也没有 `std::function` 的虚调用）。
+  ③ `std::function` 从**每条路由一个**降到**每个动词两个**（`matched`/`invoke`）。`Handler` 这个别名随之取消。
+  ⚠️ **修订（我上两轮的错判）**：我把 `BodyReader` / `ResponseWriter` 也归进了“擦除点合并要收拾的临时方案”（`plan` §4.1.2 A 里还写着“临时方案：擦除点合并后会被重构掉”，§11.2 C 那行也指的是它们）。**不成立** ——
+  合并只动 handler 表；请求/响应的接口要穿过擦除边界（handler 形参类型在擦除后对调用方不可见），它们本来就是**必要的**非模板接口。已改掉 `plan` 里那两处说法，并标了修订。
+  验收：构建退出码 0；e2e **29 条一字未改、全过**（`tests/http_e2e.py` 本次零改动 —— 对外接口 `set_routes`/`dispatch` 没变，行为等价）。
+  复核：`cmake --build --preset debug_llvm` + `./tests/run.sh`。
+
 - **2026-10-14 · S1-R5 · 立「编码纪律」文档，并按纪律清了一遍注释** ✅ —— 用户三点：① 要一份编码纪律文档；② “很多文件又出现过多的注释了”；③ 讨论里沉淀的规矩该收进去。
   新增 **`docs/coding-discipline.md`**（与 `AGENTS.md` 分家：那份是“怎么干活”，这份是“写代码时的规矩”），
   分 8 节：注释 · 抽象 · 类型与字符串 · 错误 · 异步 · 性能习惯 · 第三方库 · 文档分工。**只写验证过的，不写字面原则**。

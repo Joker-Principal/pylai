@@ -102,3 +102,7 @@ but is currently enabled; … cannot be loaded due to a configuration mismatch
 
 - 应用代码只 `import asio;`，不 `#include <asio/...>` —— 见 `server/README.md`。
 - 第三方库**不封 module**（spdlog / fmt / llhttp 直接 include）—— 见 `server/CMakeLists.txt`。
+- **导出面只留使用者需要的东西**：`export` 逐个加到公开 API 上，**不要**用 `export namespace` 一把梭
+  （详情与自检见 `docs/coding-discipline.md` §8）。同模块的其它 TU 照样看得见未导出的名字。
+- **编译期自检住在模块自己的实现单元里**（`server/route.checks.cpp`）—— 它要看树 / 建树器 / 匹配器这些内部件，
+  而"为了测试而导出内部件"是不允许的。

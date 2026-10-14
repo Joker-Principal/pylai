@@ -261,22 +261,22 @@ co_await res.status(201).content_type("application/json").header("X-Trace", "abc
 
 #### 4.1.2 交棒：怎么把“读体”交出去（✅ 已落地）
 
-**卡点**：`Handler` 已擦除成 `std::function<asio::awaitable<void>(const http::Request&, http::ResponseWriter&)>`（`server/route.cppm:26`），
+**卡点**：handler 的类型擦除边界在 **`Router` 内部**（现在每个动词**一处**：`VerbRoutes` 的两个门面 `matched` / `invoke`，见 §11.2 C），
 所以挂在 `http::Request` 上的读体句柄、以及递给响应的写通道，都必须是**非模板**的 —— 否则模板会顺着这条擦除边界往上游炸。
 
 **A. reader 接口形态**
 
 | 方案 | 形态 | 结论 |
 |---|---|---|
-| ① **抽象基类** ✅ 已定 | `http::BodyReader`：`virtual awaitable<std::size_t> read_some(std::span<std::byte>) = 0;` + `virtual bool exhausted() const;`；`http::Request` 持 `BodyReader*`（nullptr = 无体）。实现类就是 `Session` 自己。⚠️ **临时方案**：擦除点合并后会被重构掉 | 每次读一次虚调用，相对一次 `async_read_some` 可忽略 |
+| ① **抽象基类** ✅ 已定 | `http::BodyReader`：`virtual awaitable<std::size_t> read_some(std::span<std::byte>) = 0;` + `virtual bool exhausted() const;`；`http::Request` 持 `BodyReader*`（nullptr = 无体）。实现类就是 `Session` 自己。⚠️ **修订**：曾以为“擦除点合并后会被重构掉”—— **不成立**（见 §11.2 C 后的注） | 每次读一次虚调用，相对一次 `async_read_some` 可忽略 |
 | ② 函数指针表 | `{void* self; awaitable<std::size_t> (*fn)(void*, std::span<std::byte>);}` | 同样的间接层，但要手工绑 `self`，一样省不下 |
 | ③ 交棒前把体读完 | — | 与“先路由再读体”直接矛盾（404/405 不该等体） |
 
 **A′. 写通道 `http::ResponseWriter`**（与 reader 同一套理由）：`virtual awaitable<std::error_code> write(std::string_view)` +
 `keep_alive()` / `head_only()` 两个采样口（`server/http.cppm`）；实现类同样是 `Session`。
 ⚠️ 返回 `std::error_code`（`http::WriteErrc`）而不是 `bool` —— 超时与断连分得开，且不靠异常传达“连接没了”。
-⚠️ `Session` 同时实现这两个接口（`class Session : public http::BodyReader, public http::ResponseWriter`）——
-这正是 §11.2 C “擦除点合并”要收拾的东西。
+⚠️ `Session` 同时实现这两个接口（`class Session : public http::BodyReader, public http::ResponseWriter`）。
+**它们不是临时方案**（擦除点合并只动 handler 表，与这两个通道无关）：请求/响应的接口要能穿过擦除边界，就必须是非模板的。
 
 **B. 全量读与增量读**：`co_await req.body()` → `std::vector<std::byte>`（受 `max_body_bytes` 约束）；
 `co_await req.read_some(buf)` 给大文件 / SSE（返回 0 = 体结束）。二者共用一个 reader。
@@ -537,7 +537,7 @@ $\sigma$ = 争用项，$\kappa$ = 一致性项（**拐点后吞吐反而下降**
 | 阶段 | 内容 | 验证 |
 |---|---|---|
 | **0** | **协议基线**：单 io_context + io_uring，固定线程数，keep-alive，超时（空闲 / 写）。**无指标、无自适应、无 TLS**。✅ **已完成**（过程与证据见 `changelog.md`）<br>⚠️ 其中**声明式路由 / 协议层应答 / 请求体**三项已被 Stage 1 重新打开（形态变更） | 能稳定服务（外部基线见 Stage 2） |
-| **1** | **框架形态定形**（交棒 ✅ 已落地，§4.1.2）：响应类型多种（§4.1.1）· 擦除点合并（§11.2 C）· **留出观测点 / 可调参数 / 指纹挂点**（§1.1） | e2e 全绿；接口能承担 clio；文档与实现一致 |
+| **1** | **框架形态定形**（交棒 ✅ 已落地，§4.1.2）：响应类型多种（§4.1.1）✅ · 擦除点合并（§11.2 C）✅ · **留出观测点 / 可调参数 / 指纹挂点**（§1.1）🟡 | e2e 全绿；接口能承担 clio；文档与实现一致 |
 | → **MU** | 🎯 **最小可用 = Stage 1 完成即达**。只服务 clio（本地、无 TLS、小请求） | C++ 模块可被 `import` 消费；拿去 clio 试用 |
 | **2** | **有界资源与稳定性验收**：有界队列 / 在途上限 / 准入控制（固定值即可）+ **外部压测 60s 基线** | 60s 无泄漏无挂死，记录基线 |
 | **3** | **只测不调**：按 §4 的结论建在 "stream/请求" 层的指标；请求级直方图 + 计数器 + OS 侧；周期报告；**观测开销自测**；冻结模式 | 指标稳定；开销 < 1~2% |
@@ -586,7 +586,7 @@ $\sigma$ = 争用项，$\kappa$ = 一致性项（**拐点后吞吐反而下降**
 ### 11.2 路由设计定案（✅ 已落地）
 
 > 🟡 **性质**：下列每一条都是用户**逐项拍板**的结果；仍有未决项，逐条在对应小节标了状态。
-> 编译期用例在 `tests/route_static.cpp`（跟着 `cmake --build` 一起求值）。
+> 编译期用例在 `server/route.checks.cpp`（`pylai` 的**实现单元**：要看不导出的内部件，跟着 `cmake --build` 一起求值）。
 
 **一句话**：`Get<">...">` 写在**第一个形参**上声明一条路由（它同时就是请求） → **`constexpr` 构建器**在编译期解析 pattern、
 把整包压成**一棵字符级 radix tree** → 运行期持表匹配；路径参数在 handler 里用 `req.param<T, "名字">()` 取，
@@ -653,7 +653,7 @@ auto server = pylai::Server::builder()
 > **每 method 一棵树**：`SelectPatterns` 按动词筛 pattern → 每个动词一棵 `build_of()`，各树擦成闭包放进 `VerbRoutes`。
 > **注册点**：`Builder::route_on` = `validate_route` 折叠 + `validate_group` + `set_routes(make_routes(...))`；
 > 冲突时实例化未定义的 `ShadowedRoute<两条 pattern>` ⇒ **编译错误里直接点名**。
-> 编译期用例在 `tests/route_static.cpp`（99 条 `static_assert`，走 `import pylai;` 的导出面）。
+> 编译期用例在 `server/route.checks.cpp`（99 条 `static_assert`，住在模块内部 —— 因为要看树 / 建树器 / 匹配器这些不导出的内部件）。
 > ⚠️ `:route` 依赖 jk（`import jk;`，见 `modules.md`），`RouteOf<Pmf>::Params` 对外是 `JK::Meta::TList`。
 > **未落地 🔍**：运行期重建 / 切换活跃集合 · `param<T, "名字">()` 的转换失败语义。
 
@@ -669,7 +669,12 @@ auto server = pylai::Server::builder()
 | 两侧如何对齐 | 段级提取出的**捕获顺序**就是字符级树的捕获槽位序（第 i 个命名占位符 ↔ `capture[i]`） | 🟡 |
 | 表的生命周期 | **运行期对象**，可**全量重建**；"修改路由"= 切换活跃集合后重建 | 🟡 |
 | pattern 存储 | 字面量有**静态存储期** → 树里直接存 `string_view`，**不需要 `deque` / arena、零分配** | 🟡 |
-| 擦除边界 | handler 的类型擦除发生在 **`Router` 内部**；`Server` 保持**非模板单类型**。<br>🟡 **待做**：擦除粒度从**每条路由一个**降到**每个动词一处** —— 路由表里存具体类型的 tuple，“匹配 + 调用”收进同一个擦除单元（现在 `match` 与 `handlers[slot]` 是**两道**间接，互不可见） | 🟡 |
+| 擦除边界 | ✅ **每动词一处**：handler 的类型擦除发生在 **`Router` 内部**，`Server` 保持**非模板单类型**。<br>`VerbRoutes` = {`verb`, `matched`（纯判定）, `invoke`（命中就调用）} —— 内部是一棵该动词的 `constexpr` 树 + 一份**具体类型**的槽位 tuple。“匹配 + 调用”在同一个闭包里 ⇒ 捕获是 `invoke` 的参数，不再需要匹配两次 | ✅ |
+
+> **擦除点合并已落地（2026-10-14）**，两个连带结果：
+> - ✅ **删掉了那个 500 兜底**：原先每组一个 `Handler`、各自建一棵单条 pattern 的树，于是“组树命中但单条未命中”理论上可能（实际不会）→ 现在组与单条用的是**同一个**树对象，这种不一致不存在了。
+> - ✅ **`std::function` 从每条路由一个降到每个动词两个**（`matched` / `invoke`）；槽位存的是**具体类型**的 lambda，靠运行期下标比到命中（`invoke_slot<i>`），槽位本身一个都没被擦除。
+> - ⚠️ **修订（我原先的错判）**：我以为 `BodyReader` / `ResponseWriter` 也是这次合并要收拾的“临时方案”—— **不成立**。请求/响应的接口必须穿过擦除边界（handler 的形参类型在擦除后对调用方不可见），它们本来就是必要的非模板接口，与 handler 表的擦除粒度无关。
 
 > `Server` 不成模板这一点很关键：`run()` / `accept_loop()` / `session::handle()` **都不必改**，
 > 也就避免了“模板定义必须搬回 `.cppm`”的连锁反应。
@@ -678,8 +683,8 @@ auto server = pylai::Server::builder()
 > `Builder::route_on` = `validate_route` 折叠 + `validate_group` + `set_routes(make_routes(...))`（`server/server.cppm`）。
 > 注册方式**只有 `route_on`**（旧的字符串 API / 精确表 / UDL 都已不在）。
 > `e2e` 钉住了两条关键行为：`GET /items` 与 `POST /items` 各走各的树；`POST /health → 405` + `Allow`。
-> - **已知缺口** 🔍：`/users/abc → user id=0`（`from_chars` 失败静默给 0 → 需要 400 路径）；
->   `make_handler` 擦除后**没有捕获通道**，只能按本条 pattern **再匹配一次**（正确但冗余）。
+> - **已知缺口** 🔍：`/users/abc → user id=0`（`from_chars` 失败静默给 0 → 需要 400 路径）。
+>   ✅ **已解决**：`make_handler` “擦除后没有捕获通道、只能再匹配一次”的冗余 —— 捕获现在作为参数直接传给槽位。
 > - **三层级分工**：`Pattern` = **单条 route** 的语法扫描（产段）· `PieceCursor` = **变换**（段序列 → 片段序列，
 >   **不是**第二个解析器 —— 它消费 `Pattern` 的 `kind`/`text`，一个字都不重新判类型）· `insert_pattern` = **跨所有 route** 的合并（产 label）。
 >   三者输入不同 ⇒ 分三份实现是**层级划分**，不是重复。真正多余的只有 `Segment::pos` / `raw_len`（只为"事后回折"存在）。
