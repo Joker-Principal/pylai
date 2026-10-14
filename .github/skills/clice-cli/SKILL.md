@@ -41,6 +41,8 @@ tools/clice query --method references --symbol 'foo' --include-declaration
 tools/clice query --method callGraph --symbol '#1a2b3c...' --direction callers
 tools/clice query --method documentSymbols --path standalone/asio.cppm
 tools/clice refactor rename --symbol 'server/session.cppm:56' --to 'ctx' --dry-run --fresh # ✅ 改名（先 dry-run 看 edits/conflicts，再去掉 --dry-run 落盘）
+tools/clice query --method symbolSearch --symbol 'ns::Type::*' --limit 40   # ✅ 某个类的直接成员（带 kind：Method / Field / Operator）
+tools/clice query --method symbolSearch --symbol '* kind:class' --limit 80 # ✅ 全仓的类；`struct` 是另一个 kind（kind:struct），可与 `path:` 组合收窄
 tools/clice index                 # 增量建索引；Ctrl-C 断点续建
 tools/clice index --stats --top 5 # 只读：索引构成
 ```
