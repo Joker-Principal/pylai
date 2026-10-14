@@ -55,7 +55,8 @@
 | 纯文本 —— 注释、错误消息、配置、`CMakeLists`、文档里写的名字 | grep（clice 看不到这些） |
 | clice 报错 / 索引坏掉时的傅底 | grep + 编译 |
 
-- 入口 `tools/clice`；**本地 `<子命令> --help` 是接口真相**（官方文档常比已装版本新）。
+- 入口 `tools/clice`；**本地 `--help` 是接口真相**。照 SKILL.md 的配方用；**只有**发现配方与本机 `--help` 不一致（如 unknown option）
+  ⇒ 才按本机版本读仓库 `docs/` 拿准新用法并**回填 SKILL.md**（本机 clice 几乎每天更新，做法见该文件）。
 - ⚠️ 每次 `cmake --preset` 都会重写 compile_commands.json → 查询加 `--fresh` 或先 `tools/clice index`；
   没索引且没 `--fresh` 直接报错；`stale` 字段务必看。
 - 内部链接符号（static / 匿名命名空间）查不到名字 → 用答案里的 `#<hex>` + `--path`。

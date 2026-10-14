@@ -14,7 +14,15 @@ tools/clice <子命令> [选项]
 ```
 
 - `tools/clice` 是仓库内启动器，每次解析插件自带的**最新** clice（目录带版本后缀，路径会变，勿写死）；`CLICE_BIN` 可覆盖。
-- ⚠️ **本地 `--help` 是接口真相**：docs.clice.io 常比已装版本新（如统一 `--symbol` 定位符、`refactor --spec` 本机还没有），用法冲突时以 `tools/clice <子命令> --help` 为准。
+- ⚠️ **本机 clice 几乎每天更新**，但**不必每次现查**：日常照本文件的配方用即可。
+  **只有**发现配方与本机 `--help` 不一致（例如报 `unknown option`）时，才去拿该版原文并把新用法**回填本文件** ——
+  网站内容就来自 [`clice-io/clice` 的 `docs/`](https://github.com/clice-io/clice/tree/main/docs)，
+  把 `--version` 里的短 hash 当 ref 即可读到**这一版**（格式示例：`0.1.0+gfb0fa5d` ⇒ ref `fb0fa5d`）：
+
+  ```bash
+  # 中英双语都在：docs/zh/ · docs/en/；专题目录：cli/ guide/ features/ design/ dev/
+  https://raw.githubusercontent.com/clice-io/clice/<短 hash>/docs/zh/cli/<专题>.md
+  ```
 - CLI 最好与编辑器里的 `clice serve` 同版本（共享索引格式）；升级插件后若索引异常，删 `.clice/cache` 重建。
 
 ## 本仓库现状（✅ 已验证）
@@ -32,6 +40,7 @@ tools/clice query --method definition --symbol 'foo'
 tools/clice query --method references --symbol 'foo' --include-declaration
 tools/clice query --method callGraph --symbol '#1a2b3c...' --direction callers
 tools/clice query --method documentSymbols --path standalone/asio.cppm
+tools/clice refactor rename --symbol 'server/session.cppm:56' --to 'ctx' --dry-run --fresh # ✅ 改名（先 dry-run 看 edits/conflicts，再去掉 --dry-run 落盘）
 tools/clice index                 # 增量建索引；Ctrl-C 断点续建
 tools/clice index --stats --top 5 # 只读：索引构成
 ```
