@@ -15,23 +15,13 @@ module;
 module pylai;
 
 import asio;
+import jk;
 import :http;
 import :route;
 
 namespace pylai::route {
 
 namespace {
-
-// 观测钩子的收尾：RAII ⇒ `dispatch` 的**每个出口**（含 404 / 405 / 早返回）都算“离开”。
-struct DispatchGuard
-{
-	Observer* observer;
-	http::Context* ctx;
-	~DispatchGuard()
-	{
-		if(observer != nullptr) observer->on_request_end(*ctx);
-	}
-};
 
 // 字节版；文本写法另给 `string_view` 重载（与 `res.body(…)` 同一个策略）。
 // ⚠️ 状态住在 Context 里 ⇒ 必须**先 attach 再配置**（框架造响应一律这个次序）。
@@ -90,10 +80,11 @@ asio::awaitable<void> Router::dispatch(
 	http::Context& ctx, http::BodyReader& in, http::ResponseWriter& writer
 ) const
 {
-	// 观测钩子的**边界**：进入 / 离开各一次 —— 放在这里才能覆盖 404 / 405 / OPTIONS 这些没进 handler 的请求。
-	// ⚠️ 无观察者时只剩一次可预测的分支（plan §4.1.4）。
-	const DispatchGuard guard{observer_, &ctx};
-	if(observer_ != nullptr) observer_->on_request_begin(ctx);
+	if(observer_) observer_->on_request_begin(ctx);
+	const JK::Meta::Cleanup guard([this, &ctx] {
+		// 离开时的收尾交给 jk 的 `Cleanup`（RAII）⇒ 所有出口（含 404 / 405 / 早返回）都算“离开”。
+		if(observer_) observer_->on_request_end(ctx);
+	});
 
 	const http::Request& request = ctx.request();
 
