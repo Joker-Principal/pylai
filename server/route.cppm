@@ -44,9 +44,9 @@ public:
 
 	// 命中 → handler（响应由 handler 的响应类型自己发到通道）；HEAD 没有显式 `Head<>` 时落到同路径的 GET（正文由响应类型按 HEAD 抑制）；
 	// 路径存在但动词不符 → 405 + `Allow`；OPTIONS 没有显式 `Options<>` 时自动 204 + `Allow`；否则 404。
-	// `in` 是读通道（体由 handler 回头拉），与写通道一样只能从连接层来。
+	// `ctx` 是这条事务的状态（报文数据 + 响应状态）；两个通道只能从连接层来。
 	asio::awaitable<void> dispatch(
-		const http::Request& request, http::BodyReader& in, http::ResponseWriter& writer
+		http::Context& ctx, http::BodyReader& in, http::ResponseWriter& writer
 	) const;
 
 private:
@@ -982,7 +982,7 @@ constexpr void validate_group() noexcept
 //   响应类型（`http::IsResponse`）→ 框架持有的响应对象，handler 往它里面填 / 推
 template <std::size_t index, class Pmf, class Response>
 [[nodiscard]] decltype(auto) make_arg(
-	const http::Request& request, http::BodyReader& in, Response& response, std::span<const Capture> captures
+	http::Context& ctx, http::BodyReader& in, Response& response, std::span<const Capture> captures
 )
 {
 	using Params = typename RouteOf<Pmf>::Params;
@@ -990,7 +990,7 @@ template <std::size_t index, class Pmf, class Response>
 
 	if constexpr(IsRouteRequest<P>::value)
 	{
-		return P{request, captures, &in};
+		return P{ctx.request(), captures, &in};
 	}
 	else if constexpr(http::IsResponse<std::remove_cvref_t<P>>)
 	{
@@ -1033,13 +1033,13 @@ template <class C, class F, std::size_t... indices>
 	);
 
 	return [self, pmf](
-			   const http::Request& request, http::BodyReader& in, http::ResponseWriter& writer,
+			   http::Context& ctx, http::BodyReader& in, http::ResponseWriter& writer,
 			   std::span<const Capture> captures
 		   ) -> asio::awaitable<void> {
 		using Response = std::remove_cvref_t<typename Params::template At<response_slot>>;
 		Response response;
-		response.attach(writer); // 框架只逆写通道，之后什么时候写由 handler / 响应类型定
-		co_await (self->*pmf)(make_arg<indices, F>(request, in, response, captures)...);
+		response.attach(ctx, writer); // 注入状态的家 + 写通道；之后什么时候写由 handler / 响应类型定
+		co_await (self->*pmf)(make_arg<indices, F>(ctx, in, response, captures)...);
 		co_await response.finish(); // 兜底：handler 没显式收尾时由框架收（幂等）
 	};
 }
@@ -1072,18 +1072,18 @@ template <Verb verb, class C, class... Pmf, std::size_t... i>
 // 个位数 ⇒ 几层 `if` 比一次 `std::function` 虚调用还便宜，而槽位本身**一个都没被擦除**。
 template <std::size_t i, class Slots>
 [[nodiscard]] asio::awaitable<bool> invoke_slot(
-	std::size_t slot, Slots& slots, const http::Request& request, http::BodyReader& in,
+	std::size_t slot, Slots& slots, http::Context& ctx, http::BodyReader& in,
 	http::ResponseWriter& writer, std::span<const Capture> captures
 )
 {
 	if(slot == i)
 	{
-		co_await std::get<i>(slots)(request, in, writer, captures);
+		co_await std::get<i>(slots)(ctx, in, writer, captures);
 		co_return true;
 	}
 	if constexpr(i + 1 < std::tuple_size_v<Slots>)
 	{
-		co_return co_await invoke_slot<i + 1>(slot, slots, request, in, writer, captures);
+		co_return co_await invoke_slot<i + 1>(slot, slots, ctx, in, writer, captures);
 	}
 	co_return false;
 }
@@ -1100,9 +1100,9 @@ struct VerbRoutes
 	std::function<bool(std::string_view path)> matched;
 
 	// 命中就调用；false = 这条路径在本动词下不存在（由调用方决定回 405 还是 404）。
-	// ⚠️ 形参必须非模板（`std::function`）⇒ 这里给的是“零件”：报文数据 + 读通道 + 写通道；
+	// ⚠️ 形参必须非模板（`std::function`）⇒ 这里给的是“零件”：Context + 读通道 + 写通道；
 	//    `Get<…>` 视图在槽位里组装（`make_arg`）—— 所以视图本身不必穿擦除边界。
-	std::function<asio::awaitable<bool>(const http::Request&, http::BodyReader&, http::ResponseWriter&)> invoke;
+	std::function<asio::awaitable<bool>(http::Context&, http::BodyReader&, http::ResponseWriter&)> invoke;
 };
 
 template <Verb verb, class C, class... Pmf>
@@ -1121,12 +1121,12 @@ void add_verb_routes(std::vector<VerbRoutes>& routes, C* self, Pmf... pmf)
 				return match(tree, path, scratch) != k_no_route;
 			},
 			[slots = std::move(slots)](
-				const http::Request& request, http::BodyReader& in, http::ResponseWriter& writer
+				http::Context& ctx, http::BodyReader& in, http::ResponseWriter& writer
 			) -> asio::awaitable<bool> {
 				std::vector<Capture> captures;
-				const std::uint32_t slot = match(tree, request.path, captures);
+				const std::uint32_t slot = match(tree, ctx.request().path, captures);
 				if(slot == k_no_route) co_return false;
-				co_return co_await invoke_slot<0>(slot, slots, request, in, writer, captures);
+				co_return co_await invoke_slot<0>(slot, slots, ctx, in, writer, captures);
 			}
 		});
 	}

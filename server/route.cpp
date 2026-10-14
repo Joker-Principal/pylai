@@ -23,16 +23,22 @@ namespace pylai::route {
 namespace {
 
 // 字节版；文本写法另给 `string_view` 重载（与 `res.body(…)` 同一个策略）。
-[[nodiscard]] http::StringResponse text_response(int status, std::span<const std::byte> body)
+// ⚠️ 状态住在 Context 里 ⇒ 必须**先 attach 再配置**（框架造响应一律这个次序）。
+[[nodiscard]] http::StringResponse text_response(
+	http::Context& ctx, http::ResponseWriter& writer, int status, std::span<const std::byte> body
+)
 {
 	http::StringResponse response;
+	response.attach(ctx, writer);
 	response.status(status).body(body);
 	return response;
 }
 
-[[nodiscard]] http::StringResponse text_response(int status, std::string_view body)
+[[nodiscard]] http::StringResponse text_response(
+	http::Context& ctx, http::ResponseWriter& writer, int status, std::string_view body
+)
 {
-	return text_response(status, std::as_bytes(std::span{body}));
+	return text_response(ctx, writer, status, std::as_bytes(std::span{body}));
 }
 
 // 一条 path 上已注册的动词（按注册顺序，逗号分隔），给 405 / OPTIONS 的 `Allow` 用。
@@ -68,14 +74,16 @@ Router::~Router() = default;
 void Router::set_routes(std::vector<VerbRoutes> routes) { methods = std::move(routes); }
 
 asio::awaitable<void> Router::dispatch(
-	const http::Request& request, http::BodyReader& in, http::ResponseWriter& writer
+	http::Context& ctx, http::BodyReader& in, http::ResponseWriter& writer
 ) const
 {
+	const http::Request& request = ctx.request();
+
 	// 快路径：只试请求动词那个单元（匹配与调用在同一处，命中后捕获直接交给 handler）。
 	for(const VerbRoutes& route : methods)
 	{
 		if(route.verb != request.method) continue;
-		if(co_await route.invoke(request, in, writer)) co_return;
+		if(co_await route.invoke(ctx, in, writer)) co_return;
 	}
 
 	// 没写 `Head<>` 时，HEAD 落到同路径的 GET 上（正文由响应类型按 HEAD 抑制）。
@@ -84,7 +92,7 @@ asio::awaitable<void> Router::dispatch(
 		for(const VerbRoutes& route : methods)
 		{
 			if(route.verb != "GET") continue;
-			if(co_await route.invoke(request, in, writer)) co_return;
+			if(co_await route.invoke(ctx, in, writer)) co_return;
 		}
 	}
 
@@ -92,8 +100,7 @@ asio::awaitable<void> Router::dispatch(
 	const std::string allow = allowed_methods(methods, request.path);
 	if(allow.empty())
 	{
-		auto response = text_response(404, "404 Not Found\n");
-		response.attach(writer);
+		auto response = text_response(ctx, writer, 404, "404 Not Found\n");
 		co_await response.finish();
 		co_return;
 	}
@@ -101,15 +108,14 @@ asio::awaitable<void> Router::dispatch(
 	if(request.method == "OPTIONS")
 	{
 		http::EmptyResponse response;
-		response.attach(writer);
+		response.attach(ctx, writer);
 		response.header("Allow", allow);
 		co_await response.finish();
 		co_return;
 	}
 
-	auto response = text_response(405, "405 Method Not Allowed\n");
+	auto response = text_response(ctx, writer, 405, "405 Method Not Allowed\n");
 	response.header("Allow", allow);
-	response.attach(writer);
 	co_await response.finish();
 }
 

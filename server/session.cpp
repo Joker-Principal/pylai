@@ -68,7 +68,7 @@ Session::Session(const Settings& settings, const route::Router& routes, asio::ip
 	routes(routes),
 	socket(std::move(socket)),
 	remote(std::move(remote)),
-	parser(settings.max_body_bytes)
+	ctx(settings.max_body_bytes)
 {}
 
 asio::awaitable<void> Session::run()
@@ -77,7 +77,7 @@ asio::awaitable<void> Session::run()
 	{
 		if(!co_await read_headers()) co_return;
 
-		auto& req = parser.current();
+		auto& req = ctx.request();
 		body_read = 0;
 		body_finished = !req.has_body();
 
@@ -92,7 +92,7 @@ asio::awaitable<void> Session::run()
 
 		try
 		{
-			co_await routes.dispatch(req, *this, *this); // 读通道 + 写通道都是本连接
+			co_await routes.dispatch(ctx, *this, *this); // 状态 + 读通道 + 写通道都是本连接的
 		}
 		catch(const http::BodyError& e)
 		{
@@ -124,7 +124,7 @@ asio::awaitable<void> Session::reply_error(int status)
 	want_keep_alive = false;
 
 	http::StringResponse response;
-	response.attach(*this);
+	response.attach(ctx, *this);
 	response.status(status);
 	co_await response.finish();
 }
@@ -137,13 +137,13 @@ asio::awaitable<bool> Session::read_headers()
 		if(buffered > 0)
 		{
 			std::size_t consumed = 0;
-			const auto status = parser.execute(std::span{buffer}.first(buffered), consumed);
+			const auto status = ctx.execute(std::span{buffer}.first(buffered), consumed);
 
 			switch(status)
 			{
 			case http::ParseStatus::headers_complete:
 				consume(consumed);
-				parser.resume();
+				ctx.resume();
 				co_return true;
 			case http::ParseStatus::message_complete: // 无体请求可能一路走完（防御）
 				consume(consumed);
@@ -154,7 +154,7 @@ asio::awaitable<bool> Session::read_headers()
 				co_await reply_error(413);
 				co_return false;
 			case http::ParseStatus::error:
-				log::warn("[{}] bad request: {}", remote, parser.error_reason());
+				log::warn("[{}] bad request: {}", remote, ctx.error_reason());
 				co_await reply_error(400);
 				co_return false;
 			default:
@@ -179,7 +179,7 @@ asio::awaitable<bool> Session::finish_message()
 	while(!message_done)
 	{
 		std::size_t consumed = 0;
-		const auto status = parser.execute(std::span{buffer}.first(buffered), consumed);
+		const auto status = ctx.execute(std::span{buffer}.first(buffered), consumed);
 		if(consumed > 0) consume(consumed);
 
 		switch(status)
@@ -189,7 +189,7 @@ asio::awaitable<bool> Session::finish_message()
 			break;
 		case http::ParseStatus::error:
 		case http::ParseStatus::too_large:
-			log::warn("[{}] bad request: {}", remote, parser.error_reason());
+			log::warn("[{}] bad request: {}", remote, ctx.error_reason());
 			co_return false;
 		case http::ParseStatus::headers_complete:
 			log::warn("[{}] unexpected parse state while finishing the message", remote);
@@ -201,7 +201,7 @@ asio::awaitable<bool> Session::finish_message()
 		}
 	}
 
-	parser.resume();
+	ctx.resume();
 	message_done = false;
 	co_return true;
 }
@@ -218,9 +218,9 @@ asio::awaitable<std::size_t> Session::read_some(std::span<std::byte> out)
 
 		if(buffered > 0)
 		{
-			const auto step = parser.read_body(std::span{buffer}.first(buffered), out);
+			const auto step = ctx.read_body(std::span{buffer}.first(buffered), out);
 
-			if(step.failed) throw http::BodyError{400, std::string{parser.error_reason()}};
+			if(step.failed) throw http::BodyError{400, std::string{ctx.error_reason()}};
 
 			consume(step.consumed);
 			if(body_read + step.delivered > settings.max_body_bytes)

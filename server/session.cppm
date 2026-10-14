@@ -53,7 +53,7 @@ private:
 	const route::Router& routes;
 	asio::ip::tcp::socket socket;
 	std::string remote;
-	http::RequestParser parser;
+	http::Context ctx; // 每请求的事务状态（解析进度 + 报文数据 + 响应状态；跨请求复用）
 
 	std::array<std::byte, 16 * 1024> buffer{};
 	std::size_t buffered{0}; // buffer[0, buffered) 是尚未消费的字节

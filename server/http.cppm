@@ -141,6 +141,59 @@ struct Request
 	[[nodiscard]] bool has_body() const noexcept { return chunked || content_length > 0; }
 };
 
+// 解析到哪一步（`RequestParser::execute` 的返回）。
+enum class ParseStatus
+{
+	incomplete,		  // 需要更多字节（连头部都还没完）
+	headers_complete, // 头部解析完 —— 框架在此交棒；consumed = 该请求头部占用的字节数
+	message_complete, // 整个消息（含体）走完 —— 停在这里，摘掉 consumed 后 resume() 再解析下一个
+	too_large,		  // 声明的 Content-Length 超上限（解析已就地中止，不会进路由）
+	error,			  // 协议错误
+};
+
+// 请求解析器：把字节流变成 `Request`（llhttp 的持有者）。
+// ⚠️ 它只是“事务状态”的一件：请求侧的解析进度；整条事务（含响应状态）是 `Context`。
+class RequestParser
+{
+public:
+	// max_body_bytes：请求体上限。声明的 Content-Length 超上限 ⇒ execute() 返回 too_large。
+	explicit RequestParser(std::size_t max_body_bytes);
+	~RequestParser();
+
+	RequestParser(RequestParser&&) noexcept;
+	RequestParser& operator=(RequestParser&&) noexcept;
+	RequestParser(const RequestParser&) = delete;
+	RequestParser& operator=(const RequestParser&) = delete;
+
+	// **头部阶段**：喂字节直到 headers_complete（无体请求会一路走到 message_complete）。
+	// 返回后调用方应从缓冲区头部摘掉 consumed 字节。
+	ParseStatus execute(std::span<const std::byte> data, std::size_t& consumed);
+
+	// **体阶段**：载荷**直接写进 out**（最多 out.size() 字节，不缓存在 RequestParser 里）。
+	struct BodyStep
+	{
+		std::size_t consumed{0};  // 本次消费的输入字节数
+		std::size_t delivered{0}; // 写进 out 的载荷字节数
+		bool finished{false};	  // 该请求的体（整个消息）已到尾
+		bool failed{false};		  // 协议错误 —— error_reason() 里有原因
+	};
+
+	[[nodiscard]] BodyStep read_body(std::span<const std::byte> data, std::span<std::byte> out);
+
+	// 解除 headers_complete / message_complete 处的暂停（下一次 execute 前调用）。
+	void resume();
+
+	const Request& current() const;
+	Request& current(); // 当前这条请求的报文数据（解析完 start line + headers 后有效）
+
+	// 仅在 execute() 返回 error 时有意义。
+	std::string_view error_reason() const;
+
+private:
+	struct Impl;
+	std::unique_ptr<Impl> impl;
+};
+
 // 写响应时可能出的错（`std::error_code` + 自定义 category；空 error_code = 成功）。
 enum class WriteErrc
 {
@@ -236,6 +289,57 @@ enum class Stage : std::uint8_t
 // 顺序错误（头已发还改 status 之类）⇒ 抛 `std::logic_error`，消息里点名动作。
 [[noreturn]] void throw_out_of_order(std::string_view action);
 
+// 响应侧的状态：链式 setter 写的就是这里；它住在 `Context` 里（不是响应对象里）。
+struct ResponseState
+{
+	int status{200};
+	std::string content_type;
+	std::vector<Header> headers;
+	std::vector<std::string> trailer_names; // 预告尾部要补哪些字段（只对 chunked 有意义）
+	std::vector<std::byte> pending;		   // 攒着还没出网的体
+	Stage stage{Stage::config};
+
+	// 清成初始态，但**保留缓冲容量**（复用 Context 的意义就在这里）。
+	void reset() noexcept
+	{
+		status = 200;
+		content_type.clear();
+		headers.clear();
+		trailer_names.clear();
+		pending.clear();
+		stage = Stage::config;
+	}
+};
+
+// 一条请求 / 响应事务的**状态**（不做 IO）：
+//   请求侧 —— llhttp 解析进度 + 已解析的报文数据（`RequestParser`）
+//   响应侧 —— status / headers / trailer 预告 / 待写体 / 写到哪一步（`ResponseState`）
+// ⚠️ 字节进出全由通道实现（`Session`）做；连接层每请求准备一份，可复用 ⇒ 缓冲容量跨请求保留。
+// ⚠️ **连接级**的东西（未消费字节、keep-alive 判定、超时）不在这里。
+class Context
+{
+public:
+	using BodyStep = RequestParser::BodyStep;
+
+	explicit Context(std::size_t max_body_bytes);
+
+	// ═══ 请求状态 ═══
+	[[nodiscard]] ParseStatus execute(std::span<const std::byte> data, std::size_t& consumed);
+	[[nodiscard]] BodyStep read_body(std::span<const std::byte> data, std::span<std::byte> out);
+	void resume();
+	[[nodiscard]] const Request& request() const;
+	[[nodiscard]] Request& request();
+	[[nodiscard]] std::string_view error_reason() const;
+
+	// ═══ 响应状态 ═══
+	[[nodiscard]] ResponseState& response() noexcept { return response_; }
+	[[nodiscard]] const ResponseState& response() const noexcept { return response_; }
+
+private:
+	RequestParser parser_;
+	ResponseState response_;
+};
+
 // 三种响应的公共面。链式 setter 返回**具体类型**（CRTP）⇒ `res.status(201).header("X-A", "1")` 可以混着链。
 template <typename Derived>
 class ResponseBase
@@ -246,28 +350,28 @@ public:
 	ResponseBase(ResponseBase&&) noexcept = default;
 	ResponseBase& operator=(ResponseBase&&) noexcept = default;
 
-	[[nodiscard]] int status() const noexcept { return status_; }
-	[[nodiscard]] std::string_view content_type() const noexcept { return content_type_; }
-	[[nodiscard]] std::span<const Header> headers() const noexcept { return headers_; }
+	[[nodiscard]] int status() const { return state().status; }
+	[[nodiscard]] std::string_view content_type() const { return state().content_type; }
+	[[nodiscard]] std::span<const Header> headers() const { return state().headers; }
 
 	Derived& status(int code)
 	{
 		require_config("status");
-		status_ = code;
+		state().status = code;
 		return self();
 	}
 
 	Derived& content_type(std::string_view value)
 	{
 		require_config("content_type");
-		content_type_ = value;
+		state().content_type = value;
 		return self();
 	}
 
 	Derived& header(std::string_view name, std::string_view value)
 	{
 		require_config("header");
-		headers_.push_back({std::string{name}, std::string{value}});
+		state().headers.push_back({std::string{name}, std::string{value}});
 		return self();
 	}
 
@@ -275,21 +379,44 @@ public:
 	Derived& trailer(std::string_view name)
 	{
 		require_config("trailer");
-		trailer_names_.emplace_back(name);
+		state().trailer_names.emplace_back(name);
 		return self();
 	}
 
-	// 框架在调 handler 之前注入写通道。
-	void attach(ResponseWriter& writer) noexcept { out_ = &writer; }
+	// 框架在调 handler 之前注入：状态的家（`Context`）+ 写通道。
+	// ⚠️ 顺带把上一次请求的响应状态清干净（Context 跨请求复用）⇒ **配置必须在 attach 之后**。
+	void attach(Context& context, ResponseWriter& writer) noexcept
+	{
+		ctx_ = &context;
+		out_ = &writer;
+		context.response().reset();
+		self().apply_defaults();
+	}
+
+	// 各响应类型的初始状态（`EmptyResponse` 默认 204、文本类型默认 `text/plain` …）；框架 attach 时叫它。
+	void apply_defaults() noexcept {}
 
 protected:
 	ResponseBase() = default;
 
 	[[nodiscard]] Derived& self() noexcept { return static_cast<Derived&>(*this); }
 
+	// 状态就在 `Context` 里 —— 响应对象只是它的一个薄门面。
+	[[nodiscard]] ResponseState& state()
+	{
+		if(ctx_ == nullptr) throw std::logic_error{"响应状态还没就位：只能由框架 attach(Context&, ResponseWriter&) 之后用"};
+		return ctx_->response();
+	}
+
+	[[nodiscard]] const ResponseState& state() const
+	{
+		if(ctx_ == nullptr) throw std::logic_error{"响应状态还没就位：只能由框架 attach(Context&, ResponseWriter&) 之后用"};
+		return ctx_->response();
+	}
+
 	void require_config(std::string_view action) const
 	{
-		if(stage_ != Stage::config) throw_out_of_order(action);
+		if(state().stage != Stage::config) throw_out_of_order(action);
 	}
 
 	void require_writer() const
@@ -301,25 +428,24 @@ protected:
 	asio::awaitable<std::error_code> send_head(std::optional<std::uint64_t> content_length, bool chunked)
 	{
 		require_writer();
+		auto& s = state();
 
 		std::vector<Header> hint; // `Trailer:` 预告只要名字，值在末块之后补
-		hint.reserve(trailer_names_.size());
-		for(const std::string& name : trailer_names_) hint.push_back({name, {}});
+		hint.reserve(s.trailer_names.size());
+		for(const std::string& name : s.trailer_names) hint.push_back({name, {}});
 
 		const auto head = head_bytes(
-			status_, content_type_, headers_, content_length, chunked, out_->keep_alive(), hint
+			s.status, s.content_type, s.headers, content_length, chunked, out_->keep_alive(), hint
 		);
 		const auto ec = co_await out_->write(std::as_bytes(std::span{head}));
-		if(!ec) stage_ = Stage::head_sent;
+		if(!ec) s.stage = Stage::head_sent;
 		co_return ec;
 	}
 
-	int status_{200};
-	std::string content_type_{};
-	std::vector<Header> headers_;
-	std::vector<std::string> trailer_names_;
-	ResponseWriter* out_{nullptr};
-	Stage stage_{Stage::config};
+protected:
+	// 成员放末尾；派生类型（`StringResponse::flush` 等）要直接用它发头 / 发体 ⇒ protected 而非 private。
+	Context* ctx_{nullptr};		   // 状态的家（框架 attach 时给）
+	ResponseWriter* out_{nullptr}; // 写通道（同上）
 };
 
 // 有体的响应：`body(块)` 只往内存追加，出网是 flush / finish 的事。
@@ -333,7 +459,8 @@ public:
 	Derived& body(std::span<const std::byte> data)
 	{
 		require_appendable();
-		pending_.insert(pending_.end(), data.begin(), data.end());
+		auto& pending = this->state().pending;
+		pending.insert(pending.end(), data.begin(), data.end());
 		return self();
 	}
 
@@ -341,19 +468,17 @@ public:
 	Derived& body(std::string_view text) { return body(std::as_bytes(std::span{text})); }
 
 	// 还没发出去的体（定长类型 = 整个体）。
-	[[nodiscard]] std::span<const std::byte> body() const noexcept { return pending_; }
+	[[nodiscard]] std::span<const std::byte> body() const { return this->state().pending; }
 
 protected:
 	BodyResponse() = default;
-
-	std::vector<std::byte> pending_{};
 
 private:
 	void require_appendable() const
 	{
 		if constexpr(streaming)
 		{
-			if(this->stage_ == Stage::finished) throw_out_of_order("body");
+			if(this->state().stage == Stage::finished) throw_out_of_order("body");
 		}
 		else
 		{
@@ -365,7 +490,7 @@ private:
 // 有体、长度已知：长度就是 `body()` 攒下的字节数 ⇒ `Content-Length` 定界。
 struct StringResponse : BodyResponse<StringResponse, false>
 {
-	StringResponse() { content_type_ = "text/plain; charset=utf-8"; }
+	void apply_defaults() noexcept { state().content_type = "text/plain; charset=utf-8"; }
 
 	// flush：发头 + 发体（HEAD 只发头）。定长体一次性发完 ⇒ flush 即收尾。
 	asio::awaitable<std::error_code> flush();
@@ -377,7 +502,7 @@ struct StringResponse : BodyResponse<StringResponse, false>
 // 204 / 304 / 1xx 不得带 `Content-Length`（RFC 9110 §8.6）；其它状态码要 `Content-Length: 0` 才能定界。
 struct EmptyResponse : ResponseBase<EmptyResponse>
 {
-	EmptyResponse() { status_ = 204; }
+	void apply_defaults() noexcept { state().status = 204; }
 
 	asio::awaitable<std::error_code> flush();
 	asio::awaitable<std::error_code> finish() { return flush(); }
@@ -386,7 +511,7 @@ struct EmptyResponse : ResponseBase<EmptyResponse>
 // 长度未知 ⇒ 响应侧 chunked：`body(块)` 攒进内存，`flush()` 的时候才作为一个块推出去。
 struct UnknownLengthResponse : BodyResponse<UnknownLengthResponse, true>
 {
-	UnknownLengthResponse() { content_type_ = "text/plain; charset=utf-8"; }
+	void apply_defaults() noexcept { state().content_type = "text/plain; charset=utf-8"; }
 
 	// flush：头没发就先发头，然后把攒着的字节作为一个块发出去。
 	asio::awaitable<std::error_code> flush();
@@ -395,61 +520,11 @@ struct UnknownLengthResponse : BodyResponse<UnknownLengthResponse, true>
 };
 
 // 响应类型的判据（`route::make_arg` 据此区分“请求形参”与“响应形参”）：
-// 框架要能给它注入写通道、能兜底收尾。
+// 框架要能给它注入 Context + 写通道、能兜底收尾。
 template <typename T>
-concept IsResponse = requires(T& response, ResponseWriter& writer) {
-	{ response.attach(writer) } -> std::same_as<void>;
+concept IsResponse = requires(T& response, Context& context, ResponseWriter& writer) {
+	{ response.attach(context, writer) } -> std::same_as<void>;
 	{ response.finish() } -> std::same_as<asio::awaitable<std::error_code>>;
-};
-
-enum class ParseStatus
-{
-	incomplete,		  // 需要更多字节（连头部都还没完）
-	headers_complete, // 头部解析完 —— 框架在此交棒；consumed = 该请求头部占用的字节数
-	message_complete, // 整个消息（含体）走完 —— 停在这里，摘掉 consumed 后 resume() 再解析下一个
-	too_large,		  // 声明的 Content-Length 超上限（解析已就地中止，不会进路由）
-	error,			  // 协议错误
-};
-
-class RequestParser
-{
-public:
-	// max_body_bytes：请求体上限。声明的 Content-Length 超上限 ⇒ execute() 返回 too_large。
-	explicit RequestParser(std::size_t max_body_bytes);
-	~RequestParser();
-
-	RequestParser(RequestParser&&) noexcept;
-	RequestParser& operator=(RequestParser&&) noexcept;
-	RequestParser(const RequestParser&) = delete;
-	RequestParser& operator=(const RequestParser&) = delete;
-
-	// **头部阶段**：喂字节直到 headers_complete（无体请求会一路走到 message_complete）。
-	// 返回后调用方应从缓冲区头部摘掉 consumed 字节。
-	ParseStatus execute(std::span<const std::byte> data, std::size_t& consumed);
-
-	// **体阶段**：载荷**直接写进 out**（最多 out.size() 字节，不缓存在 RequestParser 里）。
-	struct BodyStep
-	{
-		std::size_t consumed{0};  // 本次消费的输入字节数
-		std::size_t delivered{0}; // 写进 out 的载荷字节数
-		bool finished{false};	  // 该请求的体（整个消息）已到尾
-		bool failed{false};		  // 协议错误 —— error_reason() 里有原因
-	};
-
-	[[nodiscard]] BodyStep read_body(std::span<const std::byte> data, std::span<std::byte> out);
-
-	// 解除 headers_complete / message_complete 处的暂停（下一次 execute 前调用）。
-	void resume();
-
-	const Request& current() const;
-	Request& current(); // 当前这条请求的报文数据（解析完 start line + headers 后有效）
-
-	// 仅在 execute() 返回 error 时有意义。
-	std::string_view error_reason() const;
-
-private:
-	struct Impl;
-	std::unique_ptr<Impl> impl;
 };
 
 } // namespace pylai::http

@@ -295,6 +295,26 @@ asio::awaitable<std::vector<std::byte>> read_body(BodyReader& in, std::uint64_t 
 	co_return out;
 }
 
+Context::Context(std::size_t max_body_bytes) : parser_(max_body_bytes) {}
+
+ParseStatus Context::execute(std::span<const std::byte> data, std::size_t& consumed)
+{
+	return parser_.execute(data, consumed);
+}
+
+Context::BodyStep Context::read_body(std::span<const std::byte> data, std::span<std::byte> out)
+{
+	return parser_.read_body(data, out);
+}
+
+void Context::resume() { parser_.resume(); }
+
+const Request& Context::request() const { return parser_.current(); }
+
+Request& Context::request() { return parser_.current(); }
+
+std::string_view Context::error_reason() const { return parser_.error_reason(); }
+
 namespace {
 
 void append_header(std::string& out, std::string_view name, std::string_view value)
@@ -445,73 +465,77 @@ void throw_out_of_order(std::string_view action)
 
 asio::awaitable<std::error_code> StringResponse::flush()
 {
-	if(stage_ == Stage::finished) co_return std::error_code{};
+	auto& s = state();
+	if(s.stage == Stage::finished) co_return std::error_code{};
 	require_writer();
 
-	if(stage_ == Stage::config)
+	if(s.stage == Stage::config)
 	{
-		const auto ec = co_await send_head(std::uint64_t{pending_.size()}, false);
+		const auto ec = co_await send_head(std::uint64_t{s.pending.size()}, false);
 		if(ec) co_return ec;
 	}
 
 	// HEAD 照发头（`Content-Length` 按 GET 的体算），正文由这里抑制（RFC 9110 §9.3.2）。
-	if(out_->head_only() || pending_.empty())
+	if(out_->head_only() || s.pending.empty())
 	{
-		stage_ = Stage::finished;
+		s.stage = Stage::finished;
 		co_return std::error_code{};
 	}
 
-	const auto ec = co_await out_->write(pending_);
-	if(!ec) stage_ = Stage::finished;
+	const auto ec = co_await out_->write(s.pending);
+	if(!ec) s.stage = Stage::finished;
 	co_return ec;
 }
 
 asio::awaitable<std::error_code> EmptyResponse::flush()
 {
-	if(stage_ == Stage::finished) co_return std::error_code{};
+	auto& s = state();
+	if(s.stage == Stage::finished) co_return std::error_code{};
 
 	// 204 / 304 / 1xx 是“无内容”，不得带 Content-Length（RFC 9110 §8.6）；
 	// 其它状态码只是“零长度内容”，必须写 Content-Length: 0 才能定界。
-	const bool no_content = status_ == 204 || status_ == 304 || (status_ >= 100 && status_ < 200);
+	const bool no_content = s.status == 204 || s.status == 304 || (s.status >= 100 && s.status < 200);
 	const auto ec = co_await send_head(no_content ? std::nullopt : std::optional<std::uint64_t>{0}, false);
-	if(!ec) stage_ = Stage::finished;
+	if(!ec) s.stage = Stage::finished;
 	co_return ec;
 }
 
 asio::awaitable<std::error_code> UnknownLengthResponse::flush()
 {
-	if(stage_ == Stage::finished) co_return std::error_code{};
+	auto& s = state();
+	if(s.stage == Stage::finished) co_return std::error_code{};
 	require_writer();
 
-	if(stage_ == Stage::config)
+	if(s.stage == Stage::config)
 	{
 		const auto ec = co_await send_head(std::nullopt, true);
 		if(ec) co_return ec;
 	}
 
 	// 空载荷不产生块："0\r\n\r\n" 是终止块，不是“空块”—— 那是 finish() 的事。
-	if(pending_.empty() || out_->head_only()) co_return std::error_code{};
+	if(s.pending.empty() || out_->head_only()) co_return std::error_code{};
 
-	const auto ec = co_await out_->write(chunk_bytes(pending_));
-	pending_.clear();
+	const auto ec = co_await out_->write(chunk_bytes(s.pending));
+	s.pending.clear();
 	co_return ec;
 }
 
 asio::awaitable<std::error_code> UnknownLengthResponse::finish(std::span<const Header> trailers)
 {
-	if(stage_ == Stage::finished) co_return std::error_code{};
+	auto& s = state();
+	if(s.stage == Stage::finished) co_return std::error_code{};
 
 	const auto flushed = co_await flush();
 	if(flushed) co_return flushed;
 
 	if(out_->head_only()) // HEAD：不应有体，也不发终止块
 	{
-		stage_ = Stage::finished;
+		s.stage = Stage::finished;
 		co_return std::error_code{};
 	}
 
 	const auto ec = co_await out_->write(last_chunk_bytes(trailers));
-	if(!ec) stage_ = Stage::finished;
+	if(!ec) s.stage = Stage::finished;
 	co_return ec;
 }
 
