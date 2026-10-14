@@ -59,7 +59,7 @@ auto server = pylai::Server::builder()
 
 | 元素 | 说明 |
 |---|---|
-| **第一个形参** | 必须是 `Get<P>` / `Post<P>` / …：它在编译期给出动词与 path pattern，同时**就是请求**（本次请求的 method / path / headers 在它里面，`req.raw` 是框架解析出的 `http::Request`） |
+| **第一个形参** | 必须是 `Get<P>` / `Post<P>` / …：它在编译期给出动词与 path pattern，同时**就是请求**（本次请求的 method / path / headers 在它里面，`req.raw()` 给框架解析出的 `http::Request`） |
 | `req.param<T, "名字">()` | 取一个命名捕获。**名字必写**，且在**编译期**对着 pattern 校对；整数走 `from_chars`，`std::string_view` 直通 |
 | `co_await req.body()` | 读完整个体（受 `max_body_bytes` 约束），返回 `std::vector<std::byte>`（**字节**，不是字符串），无体 ⇒ 空 |
 | `co_await req.read_some(buf)` | 增量读一段（大文件 / SSE），`buf` 是 `std::span<std::byte>`；返回 0 = 体结束 |

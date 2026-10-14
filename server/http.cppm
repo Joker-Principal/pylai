@@ -123,6 +123,7 @@ public:
 //    "用哪个通道"由 `route::Request`（视图）持有，报文容器不必知道。
 struct Request
 {
+public:
 	std::string method;	 // 例 "GET"
 	std::string target;	 // 原始 request-target（未解码，含 query）
 	std::string path;	 // target 里 '?' 之前的部分（未解码）
@@ -292,6 +293,7 @@ enum class Stage : std::uint8_t
 // 响应侧的状态：链式 setter 写的就是这里；它住在 `Context` 里（不是响应对象里）。
 struct ResponseState
 {
+public:
 	int status{200};
 	std::string content_type;
 	std::vector<Header> headers;

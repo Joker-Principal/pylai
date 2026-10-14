@@ -65,6 +65,7 @@ private:
 template <std::size_t n>
 struct FixedString
 {
+public:
 	char data[n]{};
 
 	constexpr FixedString() noexcept = default;
@@ -167,6 +168,7 @@ export [[nodiscard]] constexpr const char* to_string(ParseError e) noexcept
 export template <FixedString s>
 struct Pattern
 {
+public:
 	static constexpr std::string_view raw = s.view();
 
 	// 两个数组的维度都是**紧**的（不再按 raw 长度过分配）：
@@ -333,6 +335,7 @@ inline constexpr std::uint32_t k_no_route = 0xFFFF'FFFFu;
 
 struct RouteConflict
 {
+public:
 	std::uint32_t a{k_no_route};
 	std::uint32_t b{k_no_route};
 
@@ -371,6 +374,7 @@ struct RadixNode
 template <std::size_t node_capacity>
 struct RadixTree
 {
+public:
 	static constexpr std::size_t edge_capacity = (node_capacity == 0) ? 0 : node_capacity - 1;
 
 	std::array<RadixNode, node_capacity> nodes{};
@@ -418,6 +422,7 @@ struct Piece
 
 struct PieceCursor
 {
+public:
 	PatternView pattern{};
 	std::size_t seg{0};
 	std::size_t consumed{0}; // 当前字符片段已被吃掉多少字符
@@ -752,8 +757,9 @@ export enum class Verb : std::uint8_t
 
 // 一条路由的请求：既是**路由声明**（verb + pattern 在编译期），也带**本次请求的数据**。
 export template <Verb verb, FixedString pattern>
-struct Request
+class Request
 {
+public:
 	static constexpr Verb method = verb;
 	static constexpr auto literal = pattern; // 可当模板实参（按成员逐项结构等价）
 	static constexpr std::string_view route_pattern = pattern.view();
@@ -773,19 +779,20 @@ struct Request
 	// `constexpr` 是为了让编译期自检能直接构造一个请求对象（见 `server/route.checks.cpp`）；
 	// 那时没有连接 ⇒ `in` 留空 —— 那种场合只有 `param<>()` 这类“读报文数据”的用法是安全的。
 	constexpr Request(const http::Request& raw, std::span<const Capture> captures, http::BodyReader* in = nullptr) noexcept :
-		raw(raw),
+		raw_(raw),
 		captures_(captures),
 		in_(in)
 	{}
 
-	const http::Request& raw; // 框架解析出来的 start line + headers（纯数据）
+	// 报文数据（框架解析出来的 start line + headers）。
+	[[nodiscard]] const http::Request& raw() const noexcept { return raw_; }
 
 	// 读本请求的体：视图把“报文数据”与“读通道”合到一处，handler 用起来还是一件东西。
 	// ⚠️ 体是**字节**：要文本语义得自己 `http::as_text(...)`。
 	[[nodiscard]] asio::awaitable<std::vector<std::byte>> body() const
 	{
 		if(in_ == nullptr) co_return std::vector<std::byte>{};
-		co_return co_await http::read_body(*in_, raw.has_content_length ? raw.content_length : 0);
+		co_return co_await http::read_body(*in_, raw_.has_content_length ? raw_.content_length : 0);
 	}
 	asio::awaitable<std::size_t> read_some(std::span<std::byte> out) const
 	{
@@ -832,6 +839,8 @@ struct Request
 	}
 
 private:
+	// 数据全私有（`class` 的约定）；要暴露就加访问方法（例：上面的 `raw()`）。
+	const http::Request& raw_; // 框架解析出来的 start line + headers
 	std::span<const Capture> captures_{}; // 本次匹配出的命名捕获，生存期覆盖 handler 执行期间
 	http::BodyReader* in_{nullptr}; // 读通道（连接层实现）：框架在派发时给（见上面的构造函数）
 };

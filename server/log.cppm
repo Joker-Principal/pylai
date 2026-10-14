@@ -15,6 +15,7 @@ export namespace pylai::log {
 template<typename... Args>
 struct FormatStr
 {
+public:
 	template<std::convertible_to<std::string_view> StrLike>
 	consteval FormatStr(const StrLike& str, std::source_location location = std::source_location::current()) :
 		str(str),
