@@ -42,6 +42,12 @@
 **只要问题在问“符号”，就先 clice**：定义 / 引用 / 调用图 / 类型层次 / 影响面 / 跨文件重构。
 逐个 `grep` + `read_file` 自己去拼是**下策**（慢、且会漏掉签名与重载）。
 
+**三条硬规矩**
+
+1. **有可能用 clice，就一定用** —— 不是“可以考虑”，是“只要存在用法就不许绕过”。
+2. **用不顺手（报错 / 接口对不上 / 索引不灵）⇒ 立刻讲**，由用户介入；**用成了 ⇒ 记进本文件**（一行、可复现就够）。
+3. **做不到的一律不记** —— 本文件只留 clice 能做到的用法，别让做不到的条目稀释上面这条准则。
+
 | 要问的 | 走哪里 |
 |---|---|
 | 某符号在哪定义 / 被谁用 / 改它会影响谁（含跨文件、模板实例） | **clice**（或 VS Code 的 `vscode_listCodeUsages` / `vscode_renameSymbol`） |
@@ -57,6 +63,9 @@
 - **验证通道用 `query`，不用 `lint`**：`tools/clice query --method documentSymbols --path <f> --fresh`
   （`--fresh` 会先把改动过的文件重索引 = 重编译）；**新符号出现在索引里 ⇒ 该 TU 编译过**。
   `lint` 是 clang-tidy 那套命名检查，慢且跑偏，只在要查命名时用。
+- **改名 / 影响面复核**（已验证）：`query --method symbolSearch --symbol '<新名>' --fresh` 拿 `#<hex>`，
+  再 `query --method references --symbol '#<hex>' --include-declaration` 列全部引用点。
+  判据三者齐了才叫改完：**新名引用点齐全 + 旧的类型名零引用 + `stale` 为空**。
 - ⚠️ 索引坏了、或写锁被编辑器里的 `clice serve` 占着：CLI 拿不到写锁（**重载窗口没用**，只会换个 server 继续占）。
   处置 = 让 server 松手（禁用 clice 扩展）+ 删 `.clice/cache` 重建。
 

@@ -27,16 +27,17 @@ tools/clice <子命令> [选项]
 ## 高频配方
 
 ```bash
-tools/clice query --method symbolSearch --query 'async_echo' --limit 10
-tools/clice query --method definition --name 'foo'
-tools/clice query --method references --name 'foo' --include-declaration
+tools/clice query --method symbolSearch --symbol 'async_echo' --limit 10
+tools/clice query --method definition --symbol 'foo'
+tools/clice query --method references --symbol 'foo' --include-declaration
 tools/clice query --method callGraph --symbol '#1a2b3c...' --direction callers
 tools/clice query --method documentSymbols --path standalone/asio.cppm
 tools/clice index                 # 增量建索引；Ctrl-C 断点续建
 tools/clice index --stats --top 5 # 只读：索引构成
 ```
 
-- 指认符号：`--name <名字>`（模糊/限定名）；`--symbol '#<hex>'`（答案里的 id，**内部链接符号必须同时加 `--path`**）；`--path <文件> --line <n>`。
+- 指认符号：**一律用 `--symbol`**（三种定位符：名字 / 答案里的 `#<hex>` / `file:line[:column]`）；
+  ⚠️ **内部链接符号必须用 `#<hex>` 并同时加 `--path`**。输出是 JSON，`stale` 非空说明有文件被剔除。
 - 答案约定：成功 `{"result": ..., "stale": [...]}`；答不上 `{"error": ...}` 退出码 1；参数错退出码 2。**`stale` 务必看**（被剔除的过期文件；定义落在这里的符号报 not found 并给文件名）；索引只认磁盘，未保存的 buffer 看不到。
 - 输出是 JSON，用 `jq` 看。
 - ⚠️ `refactor rename` **会改文件**：先 `--dry-run`，改完必须构建。
