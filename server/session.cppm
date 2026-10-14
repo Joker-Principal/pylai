@@ -17,8 +17,8 @@ import :route;
 export namespace pylai {
 
 // 一条连接。
-// ⚠️ 它同时是两侧擦除接口的实现：`http::BodyReader`（handler 自己拉体）+ `http::ResponseWriter`
-// （响应类型自己往线上写）—— 两个方向的字节都只能从它过，所以超时 / 取消绕不过（plan §4.1.2）。
+// ⚠️ 它同时是两侧擦除接口的实现（`http::BodyReader` + `http::ResponseWriter`）——
+// 两个方向的字节都只能从它过，所以超时 / 取消绕不过。
 class Session : public http::BodyReader, public http::ResponseWriter
 {
 public:
@@ -32,8 +32,7 @@ public:
 	// http::ResponseWriter：带超时写一段字节（实现见 session.cpp）。空 error_code = 成功。
 	[[nodiscard]] asio::awaitable<std::error_code> write(std::span<const std::byte> bytes) override;
 
-	// 响应类型在**发响应头之前**读这两个值：
-	// keep_alive —— 头一写出去就冻结（未读的请求体 ⇒ 只能 close）；head_only —— HEAD 抑制正文。
+	// 响应类型在**发响应头之前**读这两个值（头一写出去就冻结 / HEAD 抑制正文）。
 	[[nodiscard]] bool keep_alive() const noexcept override;
 	[[nodiscard]] bool head_only() const noexcept override { return head_request; }
 

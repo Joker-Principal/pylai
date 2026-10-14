@@ -21,11 +21,10 @@ import :http;
 
 export namespace pylai::route {
 
-// handler 的类型擦除边界。⚠️这里只能出现**非模板**类型（请求 + 写通道），
-// 具体的响应类型在 `make_handler` 的闭包帧里构造（`docs/http-server-plan.md` §4.1.1 / §11.2 C）。
+// handler 的类型擦除边界。⚠️这里只能出现**非模板**类型（请求 + 写通道）。
 using Handler = std::function<asio::awaitable<void>(const http::Request&, http::ResponseWriter&)>;
 
-// 每个出现过的动词一张路由表（树 + 槽位表）；定义在文件后半，那里才用得到 Capture。
+// 每个出现过的动词一张路由表（树 + 槽位表）。
 struct VerbRoutes;
 
 class Router
@@ -48,11 +47,11 @@ public:
 	asio::awaitable<void> dispatch(const http::Request& request, http::ResponseWriter& writer) const;
 
 private:
-	// 每个出现过的动词一条。vector 允许不完整类型 —— `VerbRoutes` 定义在文件后半。
+	// 每个出现过的动词一条。
 	std::vector<VerbRoutes> methods;
 };
 
-// ═══ path pattern —— 编译期解析（语法表见 docs/http-server-plan.md §11.2 A）═══
+// ═══ path pattern —— 编译期解析 ═══
 
 // NTTP 载体；必须是 structural type（成员全 public、无虚函数、无 mutable）。
 template <std::size_t n>
@@ -715,16 +714,7 @@ template <std::size_t node_capacity>
 }
 
 // ═══ 路由声明 DSL：动词 + 路径住在**第一个形参** ═══
-// 用法（注册入口是 `Server::Builder::route_on`）：
-//     class User
-//     {
-//     public:
-//         asio::awaitable<void> health(Get<"/health"> req, http::StringResponse& res);
-//         asio::awaitable<void> submit(Post<"/submit/{id}"> req, http::UnknownLengthResponse& res);
-//     };
-//     路径参数在 handler 内按名字取：`auto id = req.param<int, "id">();`
-// 机制：① **声明写在第一个形参**（`Get<P>` 既是路由声明、也是请求类型）⇒ 协程返回类型自由；
-//       ② 注册时从成员指针取出动词 / 路径 / 形参表；命名捕获由 `Request::param<T, "名字">()` 自取。
+// 用法见 `docs/routing.md`；这里只有一条契约：第一个形参既是路由声明、也是本次的请求。
 
 enum class Verb : std::uint8_t
 {
@@ -753,7 +743,6 @@ enum class Verb : std::uint8_t
 }
 
 // 一条路由的请求：既是**路由声明**（verb + pattern 在编译期），也带**本次请求的数据**。
-// 声明住在形参位置 ⇒ 协程返回类型自由 —— 不再需要 `coroutine_traits` 特化，也没有 `release()`。
 template <Verb verb, FixedString pattern>
 struct Request
 {
@@ -775,8 +764,8 @@ struct Request
 	const http::Request& raw; // 框架解析出来的 start line + headers
 	std::span<const Capture> captures; // 本次匹配出的命名捕获，生存期覆盖 handler 执行期间
 
-	// 读本请求的体 —— 接口挂在请求本身上（框架读到 headers 就交棒，见 http-server-plan.md §4.1）。
-	// ⚠️ 体是**字节**（可能是任意二进制）：要文本语义得自己 `http::as_text(...)`。
+	// 读本请求的体（接口挂在请求本身上）。
+	// ⚠️ 体是**字节**：要文本语义得自己 `http::as_text(...)`。
 	[[nodiscard]] asio::awaitable<std::vector<std::byte>> body() const { co_return co_await raw.body(); }
 	asio::awaitable<std::size_t> read_some(std::span<std::byte> out) const { co_return co_await raw.read_some(out); }
 
@@ -833,9 +822,8 @@ struct IsRouteRequest<Request<verb, pattern>> : std::true_type
 {
 };
 
-// 成员指针 → 动词 / 路径 / 形参表。分解交给 jk 的 `Callable`：它覆盖 cv(4) × ref(3) × noexcept(2)
-// 全组合（手写偏特化只匹配裸形式 `R (C::*)(Ps...)`），而 `Arguments` 是带算法的 `TList`。
-// 动词 + pattern 从**第一个形参**取 —— 声明就住在那里（见上面的 `Request`）。
+// 成员指针 → 动词 / 路径 / 形参表。分解交给 jk 的 `Callable`：它覆盖 cv(4) × ref(3) × noexcept(2) 全组合。
+// 动词 + pattern 从**第一个形参**取。
 template <class Pmf>
 struct RouteOf
 {

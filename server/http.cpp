@@ -110,7 +110,7 @@ struct Parser::Impl
 		return 0;
 	}
 
-	// 头部阶段在这里停：**keep_alive 与 path/query 都搬到这里算**（依据见 docs/http-server-plan.md §4.1.2 E）。
+	// 头部阶段在这里停：keep_alive 与 path/query 都搬到这里算（此时都已定型）。
 	static int on_headers_complete(llhttp_t* parser)
 	{
 		auto* owner = self(parser);
@@ -309,8 +309,7 @@ void append_header(std::string& out, std::string_view name, std::string_view val
 	fmt::format_to(std::back_inserter(out), "{}: {}\r\n", name, value);
 }
 
-// 协议文本 → 字节缓冲。fmt 只能往 char 缓冲写，所以这一步免不了；
-// 但协议文本全是 ASCII ⇒ 换个人称直接追加即可，不需要真转换。
+// 协议文本 → 字节缓冲（协议文本全是 ASCII ⇒ 不需要真转换）。
 void append_text(std::vector<std::byte>& out, std::string_view text)
 {
 	out.insert(

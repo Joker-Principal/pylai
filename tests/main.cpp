@@ -14,9 +14,8 @@ import pylai;
 
 namespace {
 
-// 声明写法：动词 + 路径住在**第一个形参**（`Get<P>` 既是路由声明、也是请求类型），
-// 响应按**引用**传进来：链式填状态，链尾的 `flush()` 才把它发出去（写由 handler 驱动）。
-// 注册入口是 `Builder::route_on(&app, &App::...)`，整包一次挂上去。
+// 声明写法：动词 + 路径住在**第一个形参**（`Get<P>` 既是路由声明、也是请求类型）；响应按引用传进来，
+// 链式填状态、链尾 `flush()` 出网。注册入口是 `Builder::route_on(&app, &App::...)`。
 using namespace pylai::route;
 
 struct App
@@ -84,24 +83,23 @@ asio::awaitable<void> App::echo_body(Post<"/body"> req, pylai::http::StringRespo
 	co_await res.body(fmt::format("body={}", pylai::http::as_text(body))).flush();
 }
 
-// 只读一小段体就返回 —— e2e 用它验“未读体 ⇒ Connection: close”。
+// 只读一小段体就返回（见声明处的说明）。
 asio::awaitable<void> App::peek_body(Post<"/peek"> req, pylai::http::StringResponse& res)
 {
 	std::array<std::byte, 4> head{};
 	const std::size_t n = co_await req.read_some(head);
-	// 链着写两段：文本前缀 + 字节块（`body` 是追加）
 	co_await res.body("peek=").body(std::span{head}.first(n)).flush();
 }
 
-// 长度未知：一块一块推 —— 每次 `flush()` 才把攒下的字节发出去（写由 handler 驱动）。
+// 长度未知：一块一块推。
 asio::awaitable<void> App::stream(Get<"/stream">, pylai::http::UnknownLengthResponse& res)
 {
-	// 预告 `Trailer: X-Chunks`（必须在发头之前）→ 头 + 第一块由链尾的 flush 一起发出去
+	// 预告 `Trailer: X-Chunks`（必须在发头之前）；头 + 第一块由链尾的 flush 一起发出去
 	if(co_await res.trailer("X-Chunks").body("chunk-a\n").flush()) co_return;
-	if(co_await res.body("chunk-b\n").flush()) co_return; // 第二块
+	if(co_await res.body("chunk-b\n").flush()) co_return;
 
 	const std::array trailers{pylai::http::Header{"X-Chunks", "2"}};
-	co_await res.finish(trailers); // 末块 + trailer
+	co_await res.finish(trailers);
 }
 
 } // namespace

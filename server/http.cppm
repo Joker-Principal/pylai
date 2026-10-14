@@ -25,21 +25,13 @@ struct Header
 	std::string value;
 };
 
-// ═══ 语义区分：文本 vs 字节（本库的类型纪律）═══
-// **文本**用 `std::string` / `std::string_view`（method / target / header 名值 / 错误消息 …）；
-// **字节**用 `std::span<const std::byte>`（只读）/ `std::span<std::byte>`（可写）/ `std::vector<std::byte>`（拥有）
-// —— 请求体 / 响应体 / 线上字节都归后者。`std::byte` 不参与算术 ⇒ 不会有人拿二进制体当字符用。
-
-// 字节 → 文本：**显式**转换（只是换个看法，不校验编码）。
-// 反方向用标准库的 `std::as_bytes(std::span{sv})` —— 不自己造。
+// 字节 → 文本的**显式**转换（只换看法，不校验编码）；反方向用 `std::as_bytes`。
 [[nodiscard]] inline std::string_view as_text(std::span<const std::byte> bytes) noexcept
 {
 	return {reinterpret_cast<const char*>(bytes.data()), bytes.size()};
 }
 
 // 读体的句柄：实现在连接层（`Session`），框架与 handler 只认这个接口。
-// 为何是抽象基类：`route::Handler` 已经类型擦除（`std::function<awaitable<Response>(const http::Request&)>`），
-// 句柄必须**非模板**。⚠️ 擦除点合并之后这里会被重构掉（见 docs/http-server-plan.md §11.2 C）。
 class BodyReader
 {
 public:
@@ -68,7 +60,7 @@ private:
 };
 
 // 一个请求的语义视图：start line + headers。
-// ⚠️ **体不在里面** —— 框架读到 headers 就交棒，体由 handler 自己拉（`body()` / `read_some()`）。
+// ⚠️ **体不在里面** —— 体由 handler 自己拉（`body()` / `read_some()`）。
 struct Request
 {
 	std::string method;	 // 例 "GET"
@@ -97,8 +89,7 @@ struct Request
 	asio::awaitable<std::size_t> read_some(std::span<std::byte> out) const;
 };
 
-// 写响应时可能出的错：`std::error_code` + 自定义 category（空 error_code = 成功）。
-// 就两类 —— 连接没了、写超时；两者之后这个响应都不必再写。
+// 写响应时可能出的错（`std::error_code` + 自定义 category；空 error_code = 成功）。
 enum class WriteErrc
 {
 	closed = 1, // 对端已断 / 写失败
@@ -109,7 +100,6 @@ enum class WriteErrc
 [[nodiscard]] std::error_code make_error_code(WriteErrc value) noexcept;
 
 // 响应侧的写通道：擦除边界上**唯一能碰 socket** 的东西（实现在连接层 `Session`）。
-// 为何是抽象基类：`route::Handler` 已经类型擦除，通道必须**非模板**（同 `BodyReader` 的理由）。
 class ResponseWriter
 {
 public:
@@ -121,15 +111,12 @@ public:
 	// 写一段线上字节（带超时）。返回空 error_code = 成功；否则是 `WriteErrc` ⇒ 这个响应已经没救了。
 	virtual asio::awaitable<std::error_code> write(std::span<const std::byte> bytes) = 0;
 
-	// ⚠️这两项要在**发响应头之前**读，且只反映“此刻”：
-	// keep_alive —— 头一写出去就冻结（未读的请求体 ⇒ 只能 close）；head_only —— HEAD 抑制正文。
+	// ⚠️ 必须在**发响应头之前**读，且只反映“此刻”：头一写出去就冻结，HEAD 抑制正文。
 	[[nodiscard]] virtual bool keep_alive() const noexcept = 0;
 	[[nodiscard]] virtual bool head_only() const noexcept = 0;
 };
 
-// 成帧：纯函数（不碰 socket）。与通道分开，是为了让“头部 / 块 / 末块”的字节能单独测。
-// ⚠️ `head_bytes` 返回 `std::string`：头部本来就是**文本**（状态行 + 字段）；
-// `chunk_bytes` / `last_chunk_bytes` 返回**字节**：里面有调用方给的载荷字节。
+// 成帧：纯函数（不碰 socket）。`head_bytes` 返回**文本**（状态行 + 字段），chunk / 末块返回**字节**。
 // content_length 有值 → `Content-Length`；chunked → `Transfer-Encoding: chunked`；
 // trailer_names 非空 → `Trailer:` 预告（RFC 9110 §6.6.2，SHOULD）。
 std::string head_bytes(
@@ -152,11 +139,10 @@ enum class Stage : std::uint8_t
 	finished,  // 已收尾：再写什么都不理（幂等）
 };
 
-// 顺序错误（头已发还改 status 之类）。定义在 http.cpp。
+// 顺序错误（头已发还改 status 之类）⇒ 抛 `std::logic_error`，消息里点名动作。
 [[noreturn]] void throw_out_of_order(std::string_view action);
 
-// 三种响应的公共面：状态机 + 链式 setter + 发头。
-// 链式 setter 返回**具体类型**（CRTP）⇒ `res.status(201).header("X-A", "1")` 可以混着链。
+// 三种响应的公共面。链式 setter 返回**具体类型**（CRTP）⇒ `res.status(201).header("X-A", "1")` 可以混着链。
 template <typename Derived>
 class ResponseBase
 {
@@ -202,11 +188,6 @@ public:
 	// 框架在调 handler 之前注入写通道。
 	void attach(ResponseWriter& writer) noexcept { out_ = &writer; }
 
-	// ⚠️ 这里**不能**用 `operator co_await` 让 `co_await res` 生效：asio 的 promise 有成员
-	// `await_transform`，标准规定它**优先于** `operator co_await`（ASIOD 只接受 `awaitable<T,Executor>`
-	// 或 asio 的 async operation 对象，见 asio `impl/awaitable.hpp:186`）。
-	// 所以出网入口就是 `co_await res.flush()` / `co_await res.finish()`。
-
 protected:
 	ResponseBase() = default;
 
@@ -234,7 +215,6 @@ protected:
 		const auto head = head_bytes(
 			status_, content_type_, headers_, content_length, chunked, out_->keep_alive(), hint
 		);
-		// 头部是文本，通道收的是字节 —— 在这里显式换看法。
 		const auto ec = co_await out_->write(std::as_bytes(std::span{head}));
 		if(!ec) stage_ = Stage::head_sent;
 		co_return ec;
@@ -248,9 +228,8 @@ protected:
 	Stage stage_{Stage::config};
 };
 
-// 有体的响应：`body(块)` 只是**往内存里追加**，出网是 flush / finish 的事（写由 handler 驱动）。
-// 块是**字节**；文本写法另给一个 `string_view` 重载 —— 文本可以当字节看（子集），反之不行。
-// streaming = false：头里写死了 `Content-Length` ⇒ 头一发出就不许再追加。
+// 有体的响应：`body(块)` 只往内存追加，出网是 flush / finish 的事。
+// 文本写法另给 `string_view` 重载；streaming = false 时头一发出就不许再追加。
 template <typename Derived, bool streaming>
 class BodyResponse : public ResponseBase<Derived>
 {
@@ -264,7 +243,7 @@ public:
 		return self();
 	}
 
-	// 文本当体（零拷贝：只是换个看法）—— handler 里 `res.body("ok\n")` 走这个。
+	// 文本当体（`res.body("ok\n")` 走这个，零拷贝）。
 	Derived& body(std::string_view text) { return body(std::as_bytes(std::span{text})); }
 
 	// 还没发出去的体（定长类型 = 整个体）。
@@ -300,9 +279,8 @@ struct StringResponse : BodyResponse<StringResponse, false>
 	asio::awaitable<std::error_code> finish() { return flush(); }
 };
 
-// 无体响应。⚠️ 刻意**没有** `body(…)` —— 无体响应不接受体，编译期就拦下。
-// ⚠️204 / 304 / 1xx **不得**带 `Content-Length`（RFC 9110 §8.6）；其它状态码是“零长度内容”，
-// 必须写 `Content-Length: 0` 才能定界。
+// 无体响应。⚠️ 刻意**没有** `body(…)` —— 无体响应不接受体（编译期拦）。
+// 204 / 304 / 1xx 不得带 `Content-Length`（RFC 9110 §8.6）；其它状态码要 `Content-Length: 0` 才能定界。
 struct EmptyResponse : ResponseBase<EmptyResponse>
 {
 	EmptyResponse() { status_ = 204; }
@@ -311,8 +289,7 @@ struct EmptyResponse : ResponseBase<EmptyResponse>
 	asio::awaitable<std::error_code> finish() { return flush(); }
 };
 
-// 长度未知 ⇒ 响应侧 chunked。`body(块)` 攒进内存，`co_await res` 的时候才作为一个块推出去 ——
-// **推的时机由 handler 定**（这正是“写由 handler 驱动”的用处）。
+// 长度未知 ⇒ 响应侧 chunked：`body(块)` 攒进内存，`flush()` 的时候才作为一个块推出去。
 struct UnknownLengthResponse : BodyResponse<UnknownLengthResponse, true>
 {
 	UnknownLengthResponse() { content_type_ = "text/plain; charset=utf-8"; }
@@ -324,7 +301,7 @@ struct UnknownLengthResponse : BodyResponse<UnknownLengthResponse, true>
 };
 
 // 响应类型的判据（`route::make_arg` 据此区分“请求形参”与“响应形参”）：
-// 框架要能给它在调 handler 之前注入写通道、在 handler 返回后兜底收尾。
+// 框架要能给它注入写通道、能兜底收尾。
 template <typename T>
 concept IsResponse = requires(T& response, ResponseWriter& writer) {
 	{ response.attach(writer) } -> std::same_as<void>;

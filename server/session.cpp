@@ -93,7 +93,6 @@ asio::awaitable<void> Session::run()
 
 		try
 		{
-			// 响应由响应类型自己写进通道（handler 在这里自己决定读不读体）
 			co_await routes.dispatch(req, *this);
 		}
 		catch(const http::BodyError& e)
@@ -113,8 +112,7 @@ asio::awaitable<void> Session::run()
 
 		if(write_failed) co_return;
 
-		// 留下没读完的体（handler 没读 / 只读了一半）⇒ 不替客户端 drain：
-		// 响应头里已经写了 Connection: close（发头那一刻采样的），直接收工（plan §4.1）。
+		// 留下没读完的体（handler 没读 / 只读了一半）⇒ 不替客户端 drain，直接收工。
 		if(!body_finished) log::info("[{}] request body left unread; closing", remote);
 
 		if(!keep_alive()) co_return;
@@ -178,8 +176,7 @@ asio::awaitable<bool> Session::read_headers()
 	}
 }
 
-// 让 llhttp 把当前消息走完（读完体的请求已停在 message_complete；无体请求还没走过）。
-// 返回前 resume，下一个请求可以从头解析。
+// 让 llhttp 把当前消息走完（读完体的请求已停在 message_complete）。返回前 resume。
 asio::awaitable<bool> Session::finish_message()
 {
 	while(!message_done)
@@ -213,8 +210,7 @@ asio::awaitable<bool> Session::finish_message()
 }
 
 // http::BodyReader 的实现：把 llhttp 的体载荷拉出来交给 handler。
-// 每次最多交付 out.size() 字节 —— 这同时把"每次喂给 llhttp 的输入窗口"限死了，
-// 于是 on_body 拿到的载荷一定放得下（见 docs/http-server-plan.md §4.1.2 E）。
+// 每次最多交付 out.size() 字节 —— 这同时把“每次喂给 llhttp 的输入窗口”限死了。
 asio::awaitable<std::size_t> Session::read_some(std::span<std::byte> out)
 {
 	if(out.empty()) throw std::invalid_argument{"Session::read_some: empty buffer"};
@@ -319,8 +315,8 @@ asio::awaitable<std::error_code> Session::write(std::span<const std::byte> bytes
 
 bool Session::keep_alive() const noexcept
 {
-	// 头一写出去就冻结：头部已经在线上写下的 Connection 不能再改，
-	// 而“未读请求体”要到 handler 返回时才知道（推式响应更是头先出去）。
+	// 头一写出去就冻结：那时头部已经把 Connection 的值写死在线上，而“未读请求体”
+	// 要到 handler 返回时才知道。
 	return head_written ? keep_alive_decided : (want_keep_alive && body_finished);
 }
 

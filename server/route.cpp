@@ -22,7 +22,7 @@ namespace pylai::route {
 
 namespace {
 
-// 字节版（体本来是字节）；文本写法另给一个 `string_view` 重载 —— 与 `res.body(...)` 同一个策略。
+// 字节版；文本写法另给 `string_view` 重载（与 `res.body(…)` 同一个策略）。
 [[nodiscard]] http::StringResponse text_response(int status, std::span<const std::byte> body)
 {
 	http::StringResponse response;
@@ -48,12 +48,10 @@ namespace {
 		if(route.match(path, scratch) == k_no_route) continue;
 
 		if(route.verb == "HEAD") has_head = true;
-		// 先按注册顺序摊平，最后一次性 join —— HEAD 得紧跟在 GET 后面。
 		verbs.push_back(route.verb);
 	}
 
-	// 补 HEAD：GET 的隐含搭档，位置紧跟 GET（RFC 9110 §9.3.2）。放在了摊平之后，
-	// 是因为只有看完整条清单才知道有没有显式 `Head<>`。
+	// 只有看完整条清单才知道有没有显式 `Head<>` ⇒ 补 HEAD 放在摊平之后。
 	if(!has_head)
 	{
 		const auto get = std::find(verbs.begin(), verbs.end(), "GET");
