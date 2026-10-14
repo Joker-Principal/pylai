@@ -29,17 +29,6 @@ import :session;
 
 namespace pylai {
 
-namespace {
-
-http::Response error_response(int status)
-{
-	http::Response response;
-	response.status = status;
-	return response;
-}
-
-} // namespace
-
 asio::awaitable<void> Session::handle(const Settings& settings, const route::Router& routes, asio::ip::tcp::socket socket)
 {
 	std::error_code ec;
@@ -97,15 +86,19 @@ asio::awaitable<void> Session::run()
 		body_read = 0;
 		body_finished = !req.has_body();
 
-		const bool want_keep_alive = req.keep_alive && (served + 1) < settings.max_requests_per_connection;
+		want_keep_alive = req.keep_alive && (served + 1) < settings.max_requests_per_connection;
+		head_request = req.method == "HEAD";
+		head_written = false;
+		keep_alive_decided = want_keep_alive;
+		write_failed = false;
 
-		http::Response response;
 		bool body_failed = false;
 		int body_status = 0;
 
 		try
 		{
-			response = co_await routes.dispatch(req); // handler 在这里自己决定读不读体
+			// 响应由响应类型自己写进通道（handler 在这里自己决定读不读体）
+			co_await routes.dispatch(req, *this);
 		}
 		catch(const http::BodyError& e)
 		{
@@ -118,21 +111,30 @@ asio::awaitable<void> Session::run()
 
 		if(body_failed)
 		{
-			if(body_status != 0) co_await write(http::serialize(error_response(body_status), false, false));
+			if(body_status != 0) co_await reply_error(body_status);
 			co_return;
 		}
 
-		// 体没读完（handler 没读 / 只读了一半）⇒ 不替客户端 drain，直接收工：
-		// 响应里写 Connection: close，然后关连接（docs/http-server-plan.md §4.1）。
-		const bool unread = !body_finished;
-		if(unread) log::info("[{}] request body left unread; closing", remote);
+		if(write_failed) co_return;
 
-		const bool keep_alive = want_keep_alive && !unread;
-		if(!co_await write(http::serialize(response, keep_alive, req.method == "HEAD"))) co_return;
-		if(!keep_alive) co_return;
+		// 留下没读完的体（handler 没读 / 只读了一半）⇒ 不替客户端 drain：
+		// 响应头里已经写了 Connection: close（发头那一刻采样的），直接收工（plan §4.1）。
+		if(!body_finished) log::info("[{}] request body left unread; closing", remote);
+
+		if(!keep_alive()) co_return;
 
 		if(!co_await finish_message()) co_return;
 	}
+}
+
+// 错误应答：不再保持连接（体大半没读完），发一个最小的字符串响应。
+asio::awaitable<bool> Session::reply_error(int status)
+{
+	want_keep_alive = false;
+
+	http::StringResponse response;
+	response.status = status;
+	co_return co_await response.send(*this);
 }
 
 // 解析到"头部完成"（交棒点）。返回后 parser 已 resume，handler 可以拉体。
@@ -157,11 +159,11 @@ asio::awaitable<bool> Session::read_headers()
 				co_return true;
 			case http::ParseStatus::too_large:
 				log::warn("[{}] request body over {} bytes", remote, settings.max_body_bytes);
-				co_await write(http::serialize(error_response(413), false, false));
+				co_await reply_error(413);
 				co_return false;
 			case http::ParseStatus::error:
 				log::warn("[{}] bad request: {}", remote, parser.error_reason());
-				co_await write(http::serialize(error_response(400), false, false));
+				co_await reply_error(400);
 				co_return false;
 			default:
 				break;
@@ -171,7 +173,7 @@ asio::awaitable<bool> Session::read_headers()
 		if(buffered == buffer.size())
 		{
 			log::warn("[{}] request header too large", remote);
-			co_await write(http::serialize(error_response(431), false, false));
+			co_await reply_error(431);
 			co_return false;
 		}
 
@@ -282,6 +284,12 @@ asio::awaitable<bool> Session::fill_buffer()
 
 asio::awaitable<bool> Session::write(std::string_view text)
 {
+	if(!head_written)
+	{
+		head_written = true;
+		keep_alive_decided = want_keep_alive && body_finished;
+	}
+
 	using namespace asio::experimental::awaitable_operators;
 
 	asio::steady_timer timer(socket.get_executor(), settings.write_timeout);
@@ -294,6 +302,7 @@ asio::awaitable<bool> Session::write(std::string_view text)
 	if(result.index() == 0)
 	{
 		log::warn("[{}] write timeout", remote);
+		write_failed = true;
 		co_return false;
 	}
 
@@ -304,6 +313,13 @@ asio::awaitable<bool> Session::write(std::string_view text)
 		throw std::system_error(ec, "write");
 	}
 	co_return true;
+}
+
+bool Session::keep_alive() const noexcept
+{
+	// 头一写出去就冻结：头部已经在线上写下的 Connection 不能再改，
+	// 而“未读请求体”要到 handler 返回时才知道（推式响应更是头先出去）。
+	return head_written ? keep_alive_decided : (want_keep_alive && body_finished);
 }
 
 void Session::consume(std::size_t n)

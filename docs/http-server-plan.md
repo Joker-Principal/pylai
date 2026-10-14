@@ -182,7 +182,7 @@
 
 ### 4.1 请求生命周期：框架读到 headers 就交棒（✅ 已落地）
 
-**约定**：**handler 自己驱动读体**；写响应由**框架按响应类型发**；框架只负责“读到 headers + 路由 + 收尾”。
+**约定**：**handler 自己驱动读体**；写响应由**响应类型自己发**（框架只负责给它写通道）；框架只负责“读到 headers + 路由 + 收尾”。
 
 | 阶段 | 谁 | 做什么 |
 |---|---|---|
@@ -190,7 +190,7 @@
 | 路由 | 框架 | 只看 method + path，**体不参与**；404 / 405(+`Allow`) / OPTIONS 自动 204 仍由框架答 |
 | 交棒 | 框架 → handler | 构造两个形参：typed 请求 `req` + 响应对象 `res`，然后调用 handler |
 | 读体 | handler | `co_await req.body()` / `co_await req.read_some(buf)`；chunked 的块边界仍由 llhttp 剥（不变） |
-| 写响应 | **框架** | handler 只**填** `res`；返回后由框架发 —— **怎么发由响应类型决定**（见 §4.1.1） |
+| 写响应 | **响应类型** | handler 只**填** `res`（推式则边跑边 `res.write(块)`）；由响应类型通过写通道发 —— **怎么发由类型决定**（见 §4.1.1） |
 | 收尾 | 框架 | **未读的体 → `Connection: close` 并关连接**；读完则保持 keep-alive |
 
 **为何“读写都得交出去”**：先路由再读体，本身就意味着体不能再由框架预先读完（§3.1 的“读完再派发”因此失效）。
@@ -199,41 +199,43 @@
 #### 4.1.1 handler 签名：声明住在第一个形参（✅ 已落地）
 
 ```cpp
-asio::awaitable<void> handle(Get<"/health"> req, FileResponse& res);
+asio::awaitable<void> handle(Get<"/health"> req, http::StringResponse& res);
 ```
 
-| 变更 | 后果 |
+| 项 | 现状 |
 |---|---|
-| 动词 + pattern 从**返回类型**位置挪到**第一个形参** | `Get<P>` / `Post<P>` 变成“这条路由的**请求类型**”，不再是协程返回对象 |
-| **返回类型自由** | 声明住在形参、handler 返回 `awaitable<void>` ⇒ 不需要 `std::coroutine_traits` 特化、不需要 `release()`（这是整个 DSL 里最拐的一处） |
-| **响应类型多种**（beast 式） | handler 用形参**声明它产出哪种响应**；“流式”不再是一个 `stream()` 方法，而是**一种响应类型**（`FileResponse` 自带长度 → 仍可算 `Content-Length`；只有真正未知长度的才需要响应侧 chunked 或 `Connection: close`） |
-| **路径参数** | 用 `req.param<T, "名字">()`（`Request` 的成员函数）—— 请求对象本身带捕获，不在形参表里摆载体；名字必写、在**调用点**编译期校对 | ✅ |
+| 动词 + pattern 在**第一个形参** | `Get<P>` / `Post<P>` 是“这条路由的**请求类型**”，不是协程返回对象 |
+| **返回类型自由** | 声明住在形参、handler 返回 `awaitable<void>` ⇒ 不需要 `std::coroutine_traits` 特化、不需要 `release()` |
+| **响应类型多种** | handler 用**响应形参的类型**声明它产出哪种响应（**必填**）；“流式”不是 `stream()` 方法，而是**一种响应类型** | ✅ |
+| **路径参数** | `req.param<T, "名字">()`（`Request` 的成员函数）—— 请求对象本身带捕获；名字必写、在**调用点**编译期校对 | ✅ |
 | `RouteOf` | 从 `Ps...[0]` 取 `::method` / `::literal` |
-| **`req` 的语义** | ✅ **请求本身**，不是标签 → 读体接口就挂在它上面（`req.body()` / `req.read_some(buf)`），**不需要额外的 exchange 形参** |
-| **写响应** | ✅ **框架发**：handler 只**填** `res`，返回后框架发；**发法由响应类型决定**（下一格） |
-| 返回类型 | ✅ 定为 `asio::awaitable<void>`（响应走形参；**不做**“两种应答风格并存”）| ✅ |
-| `res` 的所有权 | ✅ **按引用传** —— 对象由框架持有，handler 往里填；于是“框架发”才成立（按值传的话副本随协程帧一起销毁） | ✅ |
+| **`req` 的语义** | ✅ **请求本身**，不是标签 → 读体接口挂在它上面（`req.body()` / `req.read_some(buf)`），不需要额外的 exchange 形参 |
+| **谁发** | ✅ **响应类型自己发**：框架把写通道（`http::ResponseWriter`）递进来，响应类型的 `send()` 往里写。⚠️ 不是“框架替它发” —— 推式响应只有自己知道何时结束（末块 / trailer 由它决定） | ✅ |
+| 返回类型 | ✅ 定为 `asio::awaitable<void>`（响应走形参；**不做**“两种应答风格并存”） | ✅ |
+| 响应对象的所有权 | ✅ **按引用传** —— 对象在路由闭包的协程帧里构造（零分配），handler 往里填 / 推 | ✅ |
 
-**要立的响应类型**（累积读）：
+**响应类型（✅ 三种已落地）**：
 
-| 类型 | 体 | 长度来源 | 怎么发 |
+| 类型 | 体 | 定界 | 状态 |
 |---|---|---|---|
-| `StringResponse` | 内存里的 `std::string` | `body.size()` | 常规：`Content-Length` |
-| `EmptyResponse` | 无 | 0 | 204 / 304 这类 |
-| `FileResponse` | 文件 | 文件大小（`stat`） | 常规：`Content-Length`，可分块读发 |
-| `UnknownLengthResponse` | 由 handler 分段喂 | **未知** | **响应侧 chunked** |
+| `StringResponse` | 内存里的 `std::string` | `Content-Length` | ✅ |
+| `EmptyResponse` | 无 | 204/304/1xx **不发** `Content-Length`；其它状态码发 `Content-Length: 0` | ✅ |
+| `UnknownLengthResponse` | handler 边跑边推（`co_await res.write(块)`） | **响应侧 chunked**，`finish(trailers)` 收尾 | ✅ |
+| `FileResponse` | 文件（`stat` 出长度） | `Content-Length`，分块读发 | 🔍 待做：先定异步文件 IO 的方案（`asio::stream_file` vs 阻塞 `ifstream`） |
 
-> ⚠️ 响应侧 chunked 的坑：**HEAD 不带体但 `Content-Length` 照 GET**、**204/304 既不得带体也不得 chunked** ——
-> 这两种都不能走 chunked 分支，最好在“选响应类型”这一层就**编译期**拦下。
+> ⚠️ **HEAD + 推式**：一个块也不推，头照发（含 `Transfer-Encoding: chunked` —— RFC 9112 §6.1 允许 HEAD 响应报 transfer coding）。
+> ⚠️ **204 / 304 不得带 `Content-Length`**（RFC 9110 §8.6）—— 旧实现一律写 `Content-Length: 0`，已修（见 `changelog.md`）。
+> ⚠️ **trailer**：只在 chunked 下存在，字段得是其定义允许出现在 trailer 的（`ETag` / `Accept-Ranges` / `Authentication-Info`…），
+> 且**中间设备往往直接丢弃** ⇒ 别放用户必需的信息（RFC 9110 §6.5.1 / §6.6.2）。
 
-> 📌 读侧接口在 `req`、写侧在 `res`（**按引用**）；**流式是一种响应类型**，不是一个方法。
+> 📌 读侧接口在 `req`、写侧在响应对象（**按引用**）；**流式是一种响应类型**，不是一个方法。
 
 **由此产生的硬约束**：
 
-1. **未读体** → 不替客户端 drain，直接 `Connection: close`（已定）。
-2. **响应定界**：**由响应类型决定**（表见 §4.1.1）；`Connection` 头仍由框架写；204/304/HEAD 不得走 chunked。
-3. **handler 没填响应怎么办**：框架发什么？（空 `200` / `500`）—— 因为“发”归框架了，“忘了 send”这个失败模式消失，但要给“什么都没填”一个默认 🟡。
-4. **multipart**：不是 llhttp 的活，是 body 之上的**增量**解析器。先只给全量 `co_await ex.body()`（受 `max_body_bytes` 约束），流式与 multipart 留到有真实需求。
+1. **未读体** → 不替客户端 drain，直接 `Connection: close`（已定）。⚠️ `Connection` 的值在**写响应头那一刻采样并冻结** —— 推式响应的头先出去，handler 之后再读体也改不了它（保守：那时未读完就 close）。
+2. **响应定界**：**由响应类型决定**；`Connection` 头由 `head_bytes()` 统一写。
+3. **handler 没填响应怎么办**：已不存在 —— 响应形参是**必需**的，且每个类型都有确定的默认（`StringResponse` 就是 `200` + 空体）。
+4. **multipart**：不是 llhttp 的活，是 body 之上的**增量**解析器。先只给全量 `co_await req.body()`（受 `max_body_bytes` 约束），流式与 multipart 留到有真实需求。
 
 > 已验证可沿用：`Parser::execute()` 已把 `HPE_PAUSED` 翻成 `headers_complete` / `message_complete` 两个状态，
 > `resume()` 解暂停（`server/http.cpp:220~229`）——“继续喂字节”已经是 handler 可驱动的入口（`Session::read_some`）。
@@ -246,8 +248,8 @@ asio::awaitable<void> handle(Get<"/health"> req, FileResponse& res);
 
 #### 4.1.2 交棒：怎么把“读体”交出去（✅ 已落地）
 
-**卡点**：`Handler` 已擦除成 `std::function<asio::awaitable<http::Response>(const http::Request&)>`（`server/route.cppm:24`），
-所以挂在 `http::Request` 上的读体句柄必须是**非模板**的 —— 否则模板会顺着这条擦除边界往上游炸。
+**卡点**：`Handler` 已擦除成 `std::function<asio::awaitable<void>(const http::Request&, http::ResponseWriter&)>`（`server/route.cppm:26`），
+所以挂在 `http::Request` 上的读体句柄、以及递给响应的写通道，都必须是**非模板**的 —— 否则模板会顺着这条擦除边界往上游炸。
 
 **A. reader 接口形态**
 
@@ -256,6 +258,11 @@ asio::awaitable<void> handle(Get<"/health"> req, FileResponse& res);
 | ① **抽象基类** ✅ 已定 | `http::BodyReader`：`virtual awaitable<std::size_t> read_some(std::span<char>) = 0;` + `virtual bool exhausted() const;`；`http::Request` 持 `BodyReader*`（nullptr = 无体）。实现类就是 `Session` 自己。⚠️ **临时方案**：擦除点合并后会被重构掉 | 每次读一次虚调用，相对一次 `async_read_some` 可忽略 |
 | ② 函数指针表 | `{void* self; awaitable<std::size_t> (*fn)(void*, std::span<char>);}` | 同样的间接层，但要手工绑 `self`，一样省不下 |
 | ③ 交棒前把体读完 | — | 与“先路由再读体”直接矛盾（404/405 不该等体） |
+
+**A′. 写通道 `http::ResponseWriter`**（与 reader 同一套理由）：`virtual awaitable<bool> write(std::string_view)` +
+`keep_alive()` / `head_only()` 两个采样口（`server/http.cppm:88`）；实现类同样是 `Session`。
+⚠️ `Session` 同时实现这两个接口（`class Session : public http::BodyReader, public http::ResponseWriter`）——
+这正是 §11.2 C “擦除点合并”要收拾的东西。
 
 **B. 全量读与增量读**：`co_await req.body()` → `std::string`（受 `max_body_bytes` 约束）；
 `co_await req.read_some(buf)` 给大文件 / SSE（返回 0 = 体结束）。二者共用一个 reader。
@@ -269,10 +276,11 @@ asio::awaitable<void> handle(Get<"/health"> req, FileResponse& res);
 | 任意 413 | **必须关连接**（体没读完、不 drain） | 与“未读体 ⇒ close”同一条规则 |
 
 **D. 未读体 ⇒ `Connection: close`** 的落地细节：
-handler 返回后框架看 `reader.exhausted()`；未读完 ⇒ `keep_alive = false` ⇒ 由已有的
-`serialize(response, keep_alive, head_only)` 写出 `Connection: close`（`server/http.cppm:96` 声明 · `server/session.cpp:131` 调用），随后关连接。
+handler 返回后框架看 `reader.exhausted()`；未读完 ⇒ `keep_alive = false`。⚠️ 但 `Connection` 头的值早就采样并**冻结**了
+（`Session::write()` 第一次被调时定下，`server/session.cpp:286~291`）—— 因为推式响应在 handler 还活着时就把头发了出去。
+冻结那一刻用的就是“体读完了吗”（`body_finished`），所以要么在第一次 `write()` 之前读完体，要么就是 close。
 ⚠️ 🟡 **风险**：客户端已发出体而服务器直接关闭，部分客户端会报 “connection reset”。
-e2e 要各加一条用例（handler 完全不读 / 读一半）看真实表现，再决定要不要“先 drain 掉已缓冲的那点字节”。
+e2e 已各加一条用例（handler 完全不读 / 读一半）看真实表现，再决定要不要“先 drain 掉已缓冲的那点字节”。
 
 > ✅ 用例：`close头`（响应头断言）· `unread`（405 + 未读体）· `halfread`（`POST /peek` 只读 4 字节）——
 > 后两条同时断言 `Connection: close` **与**连接真的被关。
@@ -569,8 +577,8 @@ using namespace pylai::route;
 
 struct App
 {
-	asio::awaitable<void> health(Get<"/health"> req, http::Response& res);
-	asio::awaitable<void> user(Get<"/users/{id}"> req, http::Response& res);
+	asio::awaitable<void> health(Get<"/health"> req, http::StringResponse& res);
+	asio::awaitable<void> user(Get<"/users/{id}"> req, http::StringResponse& res);
 };
 
 App app;
@@ -669,7 +677,7 @@ auto server = pylai::Server::builder()
 | 参数写法 | ✅ **`req.param<T, "名字">()`**（`Request` 的成员函数，名字必写）—— 请求对象本身带捕获，不在形参表里摆载体（没有`Param` / `ParamCount` / `SlotOf` / 位置配对这套东西） | ✅ |
 | 校对时机 | `slot_of("名字")` 在**编译期**算出下标，名字不在 pattern 里就编不过（错误定位到写的那一行）<br>⚠️ **代价**：“pattern 里的名字没人读”不再算错 —— 读取发生在 handler 体内，编译期看不到 | ✅ |
 | 失败语义 | 🔍 **缺口**：整数转换失败静默给 0（`/users/abc → id == 0`）。备选：`std::expected` 形状的返回值（`has_value()` / `value()` / `error()`），由 handler 自检 | 🟡 |
-| 注入范围 | ✅ 现在只有 `Get<…>` 请求 + `http::Response&` 两种；query / header 留待将来（**body 已就位**，见 §4.1.2） | 🟡 |
+| 注入范围 | ✅ 现在只有 `Get<…>` 请求 + **响应类型**（`http::StringResponse&` / `EmptyResponse&` / `UnknownLengthResponse&`）两种；query / header 留待将来（**body 已就位**，见 §4.1.2） | 🟡 |
 | handler 返回值 | **必须是 `asio::awaitable<void>`** | ✅ |
 
 #### E. 与主流实现的对照（本次调研来源）
@@ -695,14 +703,14 @@ auto server = pylai::Server::builder()
 2. **编译时间 / 模板深度**：类型级 Builder + `constexpr` 建树 + 协程 + 模块，四者叠加。
    路由少时看不出来，路由多时需实测。
 3. **声明式路由要求 handler 签名可内省** → **泛型 lambda（`auto` 参数）不支持**，需 `static_assert` 给出清晰报错
-   （现只剩两个约束：第一个形参是请求类型、返回类型是 `awaitable<void>`）。
+   （现共三条约束：第一个形参是请求类型、**有一个响应形参**、返回类型是 `awaitable<void>`）。
 4. **静态优先 + 冲突报错会拒掉一些“看起来合理”的组合**（如 `/a/{x}` 与 `/a/{y}` 直接编译错）。
 5. **`{rest...}` / `{$}` / 尾斜杠子树 三者语义接近**，容易误用；实现时需给对照例子。
 
 #### G. 本层：决定与遗留
 
 - **HEAD** ✅：没写 `Head<>` 时，HEAD 复用同路径的 GET handler（响应**无体**、`Content-Length` 仍按 GET 算）；显式 `Head<>` 优先。
-  抑制正文收口在 `http::serialize(response, keep_alive, head_only)` 一处（`session.cpp` 传 `req.method == "HEAD"`）→ 显式 `Head<>` 填了 `body` 也一并不发。
+  抑制正文**由响应类型各自收口**（`send()` 里读 `writer.head_only()`，值由 `session.cpp` 按 `req.method == "HEAD"` 给出）→ 显式 `Head<>` 填了 `body` 也一并不发。
 - **OPTIONS** ✅：自动应答 `204` + `Allow`（按该路径已注册的动词，无体、不声称 `Content-Type`）；路径不存在 → 404。
 - **405 的 `Allow` 头** ✅：路径上有 `GET` 而无显式 `Head<>` 时，`Allow` **带上 HEAD**（RFC 9110 §9.3.2 的隐含搭档），位置紧跟 GET。
 - **重复注册同一 `(method, path)`** ✅：**编译期报错**（`validate_group`，错误里点名两条 pattern）。跨组不可能发生：一个 builder 只允许一次 `route_on`。

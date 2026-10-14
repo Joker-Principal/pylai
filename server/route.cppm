@@ -21,7 +21,9 @@ import :http;
 
 export namespace pylai::route {
 
-using Handler = std::function<asio::awaitable<http::Response>(const http::Request&)>;
+// handler 的类型擦除边界。⚠️这里只能出现**非模板**类型（请求 + 写通道），
+// 具体的响应类型在 `make_handler` 的闭包帧里构造（`docs/http-server-plan.md` §4.1.1 / §11.2 C）。
+using Handler = std::function<asio::awaitable<void>(const http::Request&, http::ResponseWriter&)>;
 
 // 每个出现过的动词一张路由表（树 + 槽位表）；定义在文件后半，那里才用得到 Capture。
 struct VerbRoutes;
@@ -41,9 +43,9 @@ public:
 	// `Builder::route_on` 只允许调一次（它返回的 builder 已经没有 route_on 了）。
 	void set_routes(std::vector<VerbRoutes> routes);
 
-	// 命中 → handler；HEAD 没有显式 `Head<>` 时落到同路径的 GET（正文由 serialize() 按 HEAD 抑制）；
+	// 命中 → handler（响应由 handler 的响应类型自己发到通道）；HEAD 没有显式 `Head<>` 时落到同路径的 GET（正文由响应类型按 HEAD 抑制）；
 	// 路径存在但动词不符 → 405 + `Allow`；OPTIONS 没有显式 `Options<>` 时自动 204 + `Allow`；否则 404。
-	asio::awaitable<http::Response> dispatch(const http::Request& request) const;
+	asio::awaitable<void> dispatch(const http::Request& request, http::ResponseWriter& writer) const;
 
 private:
 	// 每个出现过的动词一条。vector 允许不完整类型 —— `VerbRoutes` 定义在文件后半。
@@ -717,8 +719,8 @@ template <std::size_t node_capacity>
 //     class User
 //     {
 //     public:
-//         asio::awaitable<void> health(Get<"/health"> req, http::Response& res);
-//         asio::awaitable<void> submit(Post<"/submit/{id}"> req, http::Response& res);
+//         asio::awaitable<void> health(Get<"/health"> req, http::StringResponse& res);
+//         asio::awaitable<void> submit(Post<"/submit/{id}"> req, http::UnknownLengthResponse& res);
 //     };
 //     路径参数在 handler 内按名字取：`auto id = req.param<int, "id">();`
 // 机制：① **声明写在第一个形参**（`Get<P>` 既是路由声明、也是请求类型）⇒ 协程返回类型自由；
@@ -953,10 +955,10 @@ constexpr void validate_group() noexcept
 
 // 造一个注入实参，按形参类型分两类：
 //   `Get<…>` 这类请求类型 → 包一份请求（引用 + 本次捕获；路径参数由 handler 用 `req.param<…>()` 自取）
-//   `http::Response&`    → 框架持有的响应对象，handler 往里填
-template <std::size_t index, class Pmf>
+//   响应类型（`http::IsResponse`）→ 框架持有的响应对象，handler 往它里面填 / 推
+template <std::size_t index, class Pmf, class Response>
 [[nodiscard]] decltype(auto) make_arg(
-	const http::Request& request, http::Response& response, std::span<const Capture> captures
+	const http::Request& request, Response& response, std::span<const Capture> captures
 )
 {
 	using Params = typename RouteOf<Pmf>::Params;
@@ -966,13 +968,31 @@ template <std::size_t index, class Pmf>
 	{
 		return P{request, captures};
 	}
-	else if constexpr(std::is_same_v<std::remove_cvref_t<P>, http::Response>)
+	else if constexpr(http::IsResponse<std::remove_cvref_t<P>>)
 	{
 		return response;
 	}
 	else
 	{
-		static_assert(!sizeof(P), "路由注入：形参只能是 Get<…>（第 0 个）/ http::Response&");
+		static_assert(!sizeof(P), "路由注入：形参只能是 Get<…>（第 0 个）/ 响应类型（http::StringResponse& / EmptyResponse& / UnknownLengthResponse&）");
+	}
+}
+
+// 形参表里“那个响应形参”的下标；没有 → `Params::size()`（越界值，用来拦错）。
+template <class Params, std::size_t index = 0>
+[[nodiscard]] consteval std::size_t response_index() noexcept
+{
+	if constexpr(index == Params::size())
+	{
+		return index;
+	}
+	else if constexpr(http::IsResponse<std::remove_cvref_t<typename Params::template At<index>>>)
+	{
+		return index;
+	}
+	else
+	{
+		return response_index<Params, index + 1>();
 	}
 }
 
@@ -981,16 +1001,34 @@ template <std::size_t index, class Pmf>
 template <class C, class F, std::size_t... indices>
 [[nodiscard]] Handler make_handler(C* self, F pmf, std::index_sequence<indices...>)
 {
-	return [self, pmf](const http::Request& request) -> asio::awaitable<http::Response> {
+	using Params = typename RouteOf<F>::Params;
+	static constexpr std::size_t response_slot = response_index<Params>();
+	static_assert(
+		response_slot < Params::size(),
+		"路由 handler 必须有一个响应形参：http::StringResponse& / http::EmptyResponse& / http::UnknownLengthResponse&"
+	);
+
+	return [self, pmf](const http::Request& request, http::ResponseWriter& writer) -> asio::awaitable<void> {
 		static constexpr auto tree = build<RouteOf<F>::pattern>();
 
 		std::vector<Capture> captures;
 		if(match(tree, request.path, captures) == k_no_route)
-			co_return http::Response{500, "text/plain; charset=utf-8", {}, "路由派发：组命中但单条 pattern 未命中\n"};
+		{
+			http::StringResponse fallback;
+			fallback.status = 500;
+			fallback.body = "路由派发：组命中但单条 pattern 未命中\n";
+			co_await fallback.send(writer);
+			co_return;
+		}
 
-		http::Response response; // 框架持有；handler 通过 `http::Response&` 形参往这里填
+		using Response = std::remove_cvref_t<typename Params::template At<response_slot>>;
+		Response response;
+		if constexpr(requires { response.attach(writer); })
+		{
+			response.attach(writer); // 推式响应：框架把写通道注进去，handler 才能在运行期间推块
+		}
 		co_await (self->*pmf)(make_arg<indices, F>(request, response, captures)...);
-		co_return response;
+		co_await response.send(writer);
 	};
 }
 

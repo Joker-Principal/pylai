@@ -79,9 +79,9 @@ namespace dsl_selftest {
 
 struct User
 {
-	asio::awaitable<void> health(Get<"/health"> req, pylai::http::Response& res);
-	asio::awaitable<void> submit(Post<"/submit/{id}"> req, pylai::http::Response& res);
-	asio::awaitable<void> files(Get<"/files/{path...}"> req); // 不填响应 → 框架发默认 200 + 空体
+	asio::awaitable<void> health(Get<"/health"> req, pylai::http::StringResponse& res);
+	asio::awaitable<void> submit(Post<"/submit/{id}"> req, pylai::http::StringResponse& res);
+	asio::awaitable<void> files(Get<"/files/{path...}"> req, pylai::http::EmptyResponse& res); // 响应形参是必需的
 };
 
 using Health = RouteOf<decltype(&User::health)>;
@@ -93,7 +93,7 @@ static_assert(Submit::verb == Verb::post && Submit::pattern_view == "/submit/{id
 static_assert(Files::verb == Verb::get && Files::pattern_view == "/files/{path...}");
 
 static_assert(IsRouteRequest<typename Submit::Params::template At<0>>::value); // 第 0 个形参是请求
-static_assert(std::is_same_v<typename Submit::Params::template At<1>, pylai::http::Response&>); // 响应按引用
+static_assert(std::is_same_v<typename Submit::Params::template At<1>, pylai::http::StringResponse&>); // 响应按引用
 
 // 命名捕获的**下标**在编译期算出来 —— 运行期只按这个下标取值，不按名字查找
 static_assert(Request<Verb::post, "/submit/{id}">::slot_of("id") == 0);
@@ -118,8 +118,8 @@ static_assert(Request<Verb::post, "/submit/{id}">{raw_request, not_a_number}.par
 // （旧的手写偏特化只匹配 `R (C::*)(Ps...)` —— 反证见 `.vscode/tmp/jk-callable-probe/old-trait.cpp`）。
 struct QualifiedUser
 {
-	asio::awaitable<void> ping(Get<"/c"> req) const;
-	asio::awaitable<void> post(Post<"/n/{id}"> req) noexcept;
+	asio::awaitable<void> ping(Get<"/c"> req, pylai::http::StringResponse& res) const;
+	asio::awaitable<void> post(Post<"/n/{id}"> req, pylai::http::StringResponse& res) noexcept;
 };
 
 using ConstPing = RouteOf<decltype(&QualifiedUser::ping)>;

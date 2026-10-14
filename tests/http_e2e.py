@@ -164,12 +164,92 @@ def check_unread_body(method, target, body, want_status, label):
     return ok
 
 
+def decode_chunked(raw_body):
+    """解 chunked：返回（载荷, 终止块之后的 trailer 字段行）。"""
+    payload = b""
+    trailers = []
+    pos = 0
+    while True:
+        end = raw_body.index(b"\r\n", pos)
+        size = int(raw_body[pos:end].split(b";")[0], 16)
+        pos = end + 2
+        if size == 0:
+            head = raw_body[pos:].split(b"\r\n\r\n", 1)[0]
+            trailers = [line for line in head.split(b"\r\n") if line]
+            break
+        payload += raw_body[pos : pos + size]
+        pos += size + 2  # 跳过载荷与它后面的 CRLF
+    return payload, trailers
+
+
+def check_stream():
+    """长度未知的响应：响应侧 chunked，并在末块之后补 trailer。
+
+    依据：RFC 9112 §7.1.2（`chunked-body = *chunk last-chunk trailer-section CRLF`）、
+    RFC 9110 §6.6.2（预告用 `Trailer:`）。
+    """
+    raw = request("GET", "/stream")
+    head, _, body = raw.partition("\r\n\r\n")
+    payload, trailers = decode_chunked(body.encode())
+    ok = (
+        "Transfer-Encoding: chunked" in head
+        and "Trailer: X-Chunks" in head
+        and payload == b"chunk-a\nchunk-b\n"
+        and trailers == [b"X-Chunks: 2"]
+    )
+    print(
+        f"  {'✓' if ok else '✗'} {'GET':7} {'/stream':14} -> "
+        f"chunked={'是' if 'Transfer-Encoding: chunked' in head else '否'}, "
+        f"预告={'有' if 'Trailer: X-Chunks' in head else '无'}, "
+        f"载荷={payload!r}, trailer={trailers!r}"
+    )
+    return ok
+
+
+def check_pipeline_after_stream():
+    """chunked 响应的末块之后，连接还能继续用 —— 即末块 / trailer 的成帧确实收尾了。"""
+    sock = socket.create_connection((HOST, PORT), timeout=5)
+    sock.sendall(
+        b"GET /stream HTTP/1.1\r\nHost: h\r\n\r\n"
+        b"GET /health HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n"
+    )
+    raw = b""
+    while True:
+        chunk = sock.recv(65536)
+        if not chunk:
+            break
+        raw += chunk
+    sock.close()
+
+    ok = raw.count(b"HTTP/1.1 200") == 2 and b"chunk-b" in raw and b"ok\n" in raw
+    print(
+        f"  {'✓' if ok else '✗'} {'pipeline':7} {'(stream+health)':14} -> "
+        f"收到 {raw.count(b'HTTP/1.1 200')} 个 200（期望 2，且 chunked 体后能接上第二个响应）"
+    )
+    return ok
+
+
+def check_no_content_length_on_204():
+    """204 不得带 Content-Length（RFC 9110 §8.6）—— 旧实现在 204 上也写了 `Content-Length: 0`。"""
+    raw = request("OPTIONS", "/health")
+    head = raw.partition("\r\n\r\n")[0]
+    ok = " 204 " in head.splitlines()[0] and "Content-Length" not in head
+    print(
+        f"  {'✓' if ok else '✗'} {'OPTIONS':7} {'/health':14} -> "
+        f"{head.splitlines()[0]!r}（期望 204 且无 Content-Length）"
+    )
+    return ok
+
+
 failed = (
     [check(*case) for case in CASES].count(False)
     + (0 if check_pipeline() else 1)
     + (0 if check_close_header() else 1)
     + (0 if check_unread_body("POST", "/health", b"ignored-body", 405, "unread") else 1)
     + (0 if check_unread_body("POST", "/peek", b"0123456789", 200, "halfread") else 1)
+    + (0 if check_stream() else 1)
+    + (0 if check_pipeline_after_stream() else 1)
+    + (0 if check_no_content_length_on_204() else 1)
 )
 
 print(("FAILED: %d" % failed) if failed else "ALL PASS")

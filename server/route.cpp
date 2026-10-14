@@ -17,9 +17,9 @@ namespace pylai::route {
 
 namespace {
 
-http::Response text_response(int status, std::string body)
+[[nodiscard]] http::StringResponse text_response(int status, std::string body)
 {
-	http::Response response;
+	http::StringResponse response;
 	response.status = status;
 	response.body = std::move(body);
 	return response;
@@ -58,7 +58,7 @@ Router::~Router() = default;
 
 void Router::set_routes(std::vector<VerbRoutes> routes) { methods = std::move(routes); }
 
-asio::awaitable<http::Response> Router::dispatch(const http::Request& request) const
+asio::awaitable<void> Router::dispatch(const http::Request& request, http::ResponseWriter& writer) const
 {
 	std::vector<Capture> captures;
 
@@ -68,10 +68,14 @@ asio::awaitable<http::Response> Router::dispatch(const http::Request& request) c
 		if(route.verb != request.method) continue;
 
 		const std::uint32_t slot = route.match(request.path, captures);
-		if(slot < route.handlers.size()) co_return co_await route.handlers[slot](request);
+		if(slot < route.handlers.size())
+		{
+			co_await route.handlers[slot](request, writer);
+			co_return;
+		}
 	}
 
-	// 没写 `Head<>` 时，HEAD 落到同路径的 GET 上（正文由 serialize() 按 HEAD 抑制）。
+	// 没写 `Head<>` 时，HEAD 落到同路径的 GET 上（正文由响应类型按 HEAD 抑制）。
 	if(request.method == "HEAD")
 	{
 		for(const VerbRoutes& route : methods)
@@ -79,26 +83,34 @@ asio::awaitable<http::Response> Router::dispatch(const http::Request& request) c
 			if(route.verb != "GET") continue;
 
 			const std::uint32_t slot = route.match(request.path, captures);
-			if(slot < route.handlers.size()) co_return co_await route.handlers[slot](request);
+			if(slot < route.handlers.size())
+			{
+				co_await route.handlers[slot](request, writer);
+				co_return;
+			}
 		}
 	}
 
 	// 该路径在别的动词上存在吗？有 → 405 + `Allow`；OPTIONS 有 → 自动应答。
 	const std::string allow = allowed_methods(methods, request.path);
-	if(allow.empty()) co_return text_response(404, "404 Not Found\n");
+	if(allow.empty())
+	{
+		co_await text_response(404, "404 Not Found\n").send(writer);
+		co_return;
+	}
 
 	if(request.method == "OPTIONS")
 	{
-		http::Response response;
+		http::EmptyResponse response;
 		response.status = 204;
-		response.content_type.clear(); // 204 无体，别声称有
 		response.headers.push_back({"Allow", allow});
-		co_return response;
+		co_await response.send(writer);
+		co_return;
 	}
 
-	http::Response response = text_response(405, "405 Method Not Allowed\n");
+	auto response = text_response(405, "405 Method Not Allowed\n");
 	response.headers.push_back({"Allow", allow});
-	co_return response;
+	co_await response.send(writer);
 }
 
 } // namespace pylai::route

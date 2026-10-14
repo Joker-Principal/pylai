@@ -18,15 +18,25 @@ using namespace pylai::route;
 
 struct App
 {
-	asio::awaitable<void> health(Get<"/health"> req, pylai::http::Response& res);
-	asio::awaitable<void> user(Get<"/users/{id}"> req, pylai::http::Response& res);
-	asio::awaitable<void> submit(Post<"/submit/{id}"> req, pylai::http::Response& res);
+	asio::awaitable<void> health(Get<"/health"> req, pylai::http::StringResponse& res);
+	asio::awaitable<void> user(Get<"/users/{id}"> req, pylai::http::StringResponse& res);
+	asio::awaitable<void> submit(Post<"/submit/{id}"> req, pylai::http::StringResponse& res);
+	asio::awaitable<void> sse(Get<"/sse"> req, pylai::http::UnknownLengthResponse& res);
 };
 
-asio::awaitable<void> App::user(Get<"/users/{id}"> req, pylai::http::Response& res)
+asio::awaitable<void> App::user(Get<"/users/{id}"> req, pylai::http::StringResponse& res)
 {
 	res.body = "user id=" + std::to_string(req.param<int, "id">()) + "\n";
 	co_return;
+}
+
+// 长度未知：边跑边推（响应侧 chunked），结束时补 trailer
+asio::awaitable<void> App::sse(Get<"/sse">, pylai::http::UnknownLengthResponse& res)
+{
+	res.declare_trailer("X-Chunks");       // 预告：头里会写 `Trailer: X-Chunks`
+	co_await res.write("chunk-a\n");
+	co_await res.write("chunk-b\n");
+	co_await res.finish({{{"X-Chunks", "2"}}});
 }
 
 App app;   // 必须比 server 活得久：路由里存的是 &app
@@ -44,7 +54,7 @@ auto server = pylai::Server::builder()
 | `req.param<T, "名字">()` | 取一个命名捕获。**名字必写**，且在**编译期**对着 pattern 校对；整数走 `from_chars`，`std::string_view` 直通 |
 | `co_await req.body()` | 读完整个体（受 `max_body_bytes` 约束），返回 `std::string`；无体 ⇒ 空串 |
 | `co_await req.read_some(buf)` | 增量读一段（大文件 / SSE）；返回 0 = 体结束 |
-| `pylai::http::Response&` | 框架持有的响应对象，handler 往里填（状态码 / 头 / 体）。**可以不写** —— 不写就发默认的 `200` + 空体 |
+| 响应形参（**必需**） | 声明本条路由产出哪种响应：`StringResponse&`（内存体）/ `EmptyResponse&`（无体）/ `UnknownLengthResponse&`（长度未知，边跑边推）。详见 §1.2 |
 | 返回类型 | 必须是 `asio::awaitable<void>` |
 | `Builder::route_on(&app, &App::m...)` | 一次注册整包；**每个动词一棵**编译期定容的树（不是一棵） |
 
@@ -66,12 +76,43 @@ auto server = pylai::Server::builder()
 | 第一个形参不是 `Get<…>` 这类 | 「路由声明：第一个形参必须是 `Get<"…">` / `Post<"…">` 这样的请求类型…」 |
 | 返回类型不是 `asio::awaitable<void>` | 「路由声明：handler 必须返回 `asio::awaitable<void>`…」 |
 | `param<T, "名字">()` 里的名字不在 pattern 里 | 「路由声明：路径里没有这个名字的命名捕获」 |
-| 形参是别的类型（比如 `int`） | 「路由注入：形参只能是 `Get<…>`（第 0 个）/ `http::Response&`」 |
+| 形参是别的类型（比如 `int`） | 「路由注入：形参只能是 `Get<…>`（第 0 个）/ 响应类型（`http::StringResponse&` 等）」 |
+| 没写响应形参 | 「路由 handler 必须有一个响应形参：http::StringResponse& / http::EmptyResponse& / http::UnknownLengthResponse&」 |
 | 同一动词下两条路由会为同一路径争抢 | 编译错误里直接出现这两条 pattern（`ShadowedRoute<"…", "…">`） |
 | 写了两次 `route_on` | `no member named 'route_on'` —— `route_on` 之后返回的 builder 只剩 `build()` |
 
 > 📌 **一个 server 只能声明一组路由**（`route_on` 之后就没有 `route_on` 了）—— 所以跨组冲突根本不存在，不需要运行期检查。
 > 需要单独检查一条 pattern 时可以用 `Pattern<"…">`（`ok()` / `err` / `params()`），但它**不参与注册**。
+
+### 1.2 响应类型：声明哪一种，就用哪一种
+
+响应形参的类型就是 **handler 声明的“我产出哪种响应”**（框架按它构造具体对象，类型在编译期就定下来）。
+
+| 类型 | 体在哪 | 定界 | 典型用途 |
+|---|---|---|---|
+| `http::StringResponse` | 内存里的 `std::string`（`res.body`） | `Content-Length` | 绝大多数接口 |
+| `http::EmptyResponse` | 无 | 204 / 304 / 1xx：**不发** `Content-Length`；其它状态码发 `Content-Length: 0` | OPTIONS 204、304 |
+| `http::UnknownLengthResponse` | handler 边跑边推（`co_await res.write(块)`） | **响应侧 chunked** | SSE / 大响应流 |
+
+公共字段：`status`（默认 200 / 204）· `content_type` · `headers`（`{名字, 值}` 列表）。
+响应**由响应类型自己发**：框架只把写通道（`http::ResponseWriter`）交给它，两个方向的字节都从 `Session` 过 ⇒ 写超时绕不过。
+
+```cpp
+res.status = 201;
+res.content_type = "application/json";
+res.headers.push_back({"X-Trace", "abc"});
+res.body = R"({"ok":true})";
+```
+
+**推式（`UnknownLengthResponse`）**：
+- 第一次 `write()` 时把响应头发出去（那时才采样 `Connection`）；
+- `co_await res.finish(trailers)` = 终止块 + trailer；**不调也行** —— 框架会在 handler 返回后补收尾。
+- `res.declare_trailer("X-…")` 会在头里预告 `Trailer: X-…`（RFC 9110 §6.6.2，SHOULD）。
+
+> ⚠️ **trailer 只在 chunked 下存在**（`Content-Length` 定界的响应根本没有它）。且字段得是**其定义允许出现在 trailer** 的
+> （如 `ETag`、`Accept-Ranges`、`Authentication-Info`）；中间设备“往往直接丢掉”，所以别放用户必需的信息（RFC 9110 §6.5.1）。
+>
+> ⚠️ **HEAD 的推式响应**：一个块也不推（`write()` 直接返回），头照发（含 `Transfer-Encoding: chunked`）。
 
 ---
 
@@ -238,5 +279,5 @@ chars(0)  →  param(1)  →  catch_all(2)  →  end_mark(3)
 - **路径上有 `GET` 却没有显式 `Head<>` 时补一个 `HEAD`**，紧跟 GET 之后 —— RFC 9110 §9.3.2 把 HEAD 当作 GET 的隐含搭档。
   所以只写一条 `Get<"/health">`，`Allow` 就是 `GET, HEAD`。
 
-> ⚠️ “不发正文”是在 `http::serialize(response, keep_alive, head_only)` 里收口的（`session.cpp` 传 `req.method == "HEAD"`）——
+> ⚠️ “不发正文”由**响应类型**在收尾时按 `ResponseWriter::head_only()` 抑制（`session.cpp` 传 `req.method == "HEAD"`）——
 > 于是**显式 `Head<>` 的 handler 就算填了 `response.body` 也不会发出去**（但它的长度会出现在 `Content-Length` 里）。

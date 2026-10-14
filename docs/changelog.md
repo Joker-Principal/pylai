@@ -20,6 +20,30 @@
 
 ## 阶段 1 · 框架形态定形
 
+- **2026-10-14 · S1-R1 · 响应类型三种落地：响应自己发，框架只给写通道** ✅ —— 起点是用户问“发体途中还能发头吧？得讨论一下”。
+  查 RFC 后确认：**能，但只有一处** —— 响应侧 chunked 的 `trailer-section`（RFC 9112 §7.1.2 `chunked-body = *chunk last-chunk trailer-section CRLF`），
+  且受三重约束：必须 chunked 定界（`Content-Length` 定界的响应根本没有 trailer）；字段得是**其定义允许出现在 trailer** 的
+  （`ETag` / `Accept-Ranges` / `Authentication-Info` 等，RFC 9110 §6.5.1）；**中间设备“往往直接丢掉”** ⇒ 不能放用户必需的信息；
+  另 §6.6.2 说 `Trailer:` **SHOULD** 预告、§8.8.3 说 `ETag` 可作 trailer（但“除非生成于发送内容期间，否则宁可作头”）。
+  ⇒ **决定甲：trailer 作为写通道的能力提供（`declare_trailer` 预告 + `finish(trailers)` 交付），不搞“边发体边发头”的通用机制。**
+  落地产出：`http::ResponseWriter`（`write` / `keep_alive()` / `head_only()`，`server/http.cppm:88`）+
+  成帧纯函数 `head_bytes` / `chunk_bytes` / `last_chunk_bytes`（`server/http.cppm:108~118`）+
+  三种响应类型（`StringResponse` / `EmptyResponse` / `UnknownLengthResponse`，各自 `awaitable<bool> send(ResponseWriter&)`）+
+  `IsResponse` 概念（`server/http.cppm:173`）⇒ `make_handler` 按**静态已知**的响应类型构造对象（零分配）后 `co_await response.send(writer)`。
+  ⚠️ **修订（我自己的错）**：讨论时我给的选项表把“值语义 variant”列为备选 C，**不成立**——推式响应必须穿过一条活的写通道，塞不进 variant；
+  而 variant 也没有用户：具体类型在 `make_handler` 里静态已知（`Pmf` 是模板参数）。用户拍板“不要 variant”，最终形态 = 具体类型 + 概念约束 + 编译期分派，
+  **响应侧零虚函数**（唯一的虚接口是写通道本身）。
+  ⚠️ **修订**：`204` / `304` 及 `1xx` **不得带 `Content-Length`**（RFC 9110 §8.6）；旧实现一律写 `Content-Length: 0` ⇒ 已修，e2e 钉住。
+  ⚠️ **修订**：“响应形参可以不写”作废 —— 现在**必需**，且必须点名具体响应类型（`static_assert` 给出三选一的提示）；
+  理由：类型即“我产出哪种响应”，不写就退化成运行期分支。
+  ⚠️ **新发现的硬约束**：`Connection` 的值必须**在写响应头之前采样、之后就冻结**（`Session::write()` 首次调用时定，`server/session.cpp:286~291`）——
+  推式响应的头在 handler 还活着时就出去了，此后 handler 再读体也改不了它；采样用的就是“体读完了吗”（`body_finished`），
+  ⇒ 要么在第一次 `write()` 之前读完体，要么就是 `close`。
+  验收：既有 e2e **26 条一字未改、全过**；新增 3 条（`/stream` 的 chunked + `Trailer:` 预告 + 末块后 trailer 字段；stream 之后 pipelining 仍可用；
+  `OPTIONS /health` 断言 204 **无** `Content-Length`）⇒ **29/29**；构建退出码 0。`tests/http_e2e.py` 的改动是**纯新增**（`git diff` 里没有一行既有断言被改）。
+  🔍 留下的缺口：`Expect: 100-continue`（`on_headers_complete` 交棒后没人立刻回 `100`，客户端可能干等；RFC 9110 §10.1.1 要求服务端要么发终响应、要么**立刻**发 `100`，不得等体）——单独一轮。
+  复核：`cmake --build --preset debug_llvm` + `./tests/run.sh`；文档同步 `routing.md` §1/§1.2、`http-server-plan.md` §4.1.1/§4.1.2。
+
 - **2026-10-14 · 文档重组：历史论证从 plan 搬到这里；changelog 改定位**（规则确立，不编号）——
   用户指出两点：① 讨论轮次要**小步快跑、每轮一个编号**（原先只有日期，一天多轮分不清前后）；
   ② `changelog.md` 的定位改为**专记历史论证**（流式叙述），`http-server-plan.md` 只留现状设计。

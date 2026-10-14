@@ -1,8 +1,10 @@
 module;
 
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -81,19 +83,96 @@ struct Request
 	asio::awaitable<std::size_t> read_some(std::span<char> out) const;
 };
 
-// 要写回去的响应。状态行与 Content-Length / Connection 由 serialize() 生成，
-// 其余（Content-Type、附加头）由 handler 提供；content_type 为空则不发送该头。
-struct Response
+// 响应侧的写通道：擦除边界上**唯一能碰 socket** 的东西（实现在连接层 `Session`）。
+// 为何是抽象基类：`route::Handler` 已经类型擦除，通道必须**非模板**（同 `BodyReader` 的理由）。
+class ResponseWriter
+{
+public:
+	ResponseWriter() = default;
+	virtual ~ResponseWriter() = default;
+	ResponseWriter(const ResponseWriter&) = delete;
+	ResponseWriter& operator=(const ResponseWriter&) = delete;
+
+	// 写一段线上字节（带超时）。false = 连接已经没了（写超时 / 对端断）⇒ 调用方应收工。
+	virtual asio::awaitable<bool> write(std::string_view bytes) = 0;
+
+	// ⚠️这两项要在**发响应头之前**读，且只反映“此刻”：
+	// keep_alive —— 头一写出去就冻结（未读的请求体 ⇒ 只能 close）；head_only —— HEAD 抑制正文。
+	[[nodiscard]] virtual bool keep_alive() const noexcept = 0;
+	[[nodiscard]] virtual bool head_only() const noexcept = 0;
+};
+
+// 成帧：纯函数（不碰 socket）。与通道分开，是为了让“头部 / 块 / 末块”的字节能单独测。
+// content_length 有值 → `Content-Length`；chunked → `Transfer-Encoding: chunked`；
+// trailer_names 非空 → `Trailer:` 预告（RFC 9110 §6.6.2，SHOULD）。
+std::string head_bytes(
+	int status,
+	std::string_view content_type,
+	std::span<const Header> headers,
+	std::optional<std::uint64_t> content_length,
+	bool chunked,
+	bool keep_alive,
+	std::span<const Header> trailer_names
+);
+std::string chunk_bytes(std::string_view data);
+std::string last_chunk_bytes(std::span<const Header> trailers);
+
+// 一个有体的响应：头部 + 内存里的体，`Content-Length` 定界。
+struct StringResponse
 {
 	int status{200};
 	std::string content_type{"text/plain; charset=utf-8"};
 	std::vector<Header> headers;
 	std::string body;
+
+	// 发给通道。false = 连接没了（不必再写）。HEAD 时正文不发，`Content-Length` 照旧（RFC 9110 §9.3.2）。
+	asio::awaitable<bool> send(ResponseWriter& out) const;
 };
 
-// 把响应写成线上字节。keep_alive 决定 Connection 头；head_only 抑制正文
-// （HEAD 请求：Content-Length 仍按 response.body 报，但不发体）。
-std::string serialize(const Response& response, bool keep_alive, bool head_only);
+// 无体响应。⚠️204 / 304 / 1xx **不得**带 `Content-Length`（RFC 9110 §8.6）；
+// 其它状态码用 `EmptyResponse` 就是“零长度内容”，要写 `Content-Length: 0` 才能定界。
+struct EmptyResponse
+{
+	int status{204};
+	std::vector<Header> headers;
+
+	asio::awaitable<bool> send(ResponseWriter& out) const;
+};
+
+// 长度未知 ⇒ 响应侧 chunked，由 handler 分段推。
+// 它是三种响应类型里唯一**在 handler 运行期间就写线上字节**的：写通道由框架在调 handler 前注入。
+struct UnknownLengthResponse
+{
+	int status{200};
+	std::string content_type{"text/plain; charset=utf-8"};
+	std::vector<Header> headers;
+
+	// 预告尾部要补哪些字段（SHOULD）。必须在**第一次 write 之前**调，否则头已经发出去了。
+	void declare_trailer(std::string_view name);
+
+	// 推一块（第一次调用时把响应头发出去）。空串不产生块（空块就是终止块）。
+	asio::awaitable<bool> write(std::string_view data);
+	// 收尾：末块 + trailer。可重入（重复调无副作用）。
+	asio::awaitable<bool> finish(std::span<const Header> trailers = {});
+
+	// 统一入口：handler 没显式 finish 时由框架在这里收尾 ⇒ 三种响应类型的形状一致（`IsResponse`）。
+	asio::awaitable<bool> send(ResponseWriter& writer);
+
+	// 框架注入写通道；`attach` 的存在本身就是“这种响应需要通道”的判据。
+	void attach(ResponseWriter& writer) noexcept { out = &writer; }
+
+private:
+	ResponseWriter* out{nullptr};
+	bool started{false};
+	bool finished{false};
+	std::vector<std::string> trailer_names;
+};
+
+// 响应类型的判据（`route::make_arg` 据此区分“请求形参”与“响应形参”）。
+template <typename T>
+concept IsResponse = requires(T& response, ResponseWriter& writer) {
+	{ response.send(writer) } -> std::same_as<asio::awaitable<bool>>;
+};
 
 enum class ParseStatus
 {

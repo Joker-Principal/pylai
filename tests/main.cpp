@@ -16,68 +16,71 @@ using namespace pylai::route;
 
 struct App
 {
-	asio::awaitable<void> health(Get<"/health"> req, pylai::http::Response& res);
-	asio::awaitable<void> user(Get<"/users/{id}"> req, pylai::http::Response& res);
-	asio::awaitable<void> submit(Post<"/submit/{id}"> req, pylai::http::Response& res);
+	asio::awaitable<void> health(Get<"/health"> req, pylai::http::StringResponse& res);
+	asio::awaitable<void> user(Get<"/users/{id}"> req, pylai::http::StringResponse& res);
+	asio::awaitable<void> submit(Post<"/submit/{id}"> req, pylai::http::StringResponse& res);
 
 	// 同一条路径、两个动词：树按 pattern 建、动词不参与，所以这一组必须靠「每 method 一棵树」才不互相吃。
-	asio::awaitable<void> list_items(Get<"/items"> req, pylai::http::Response& res);
-	asio::awaitable<void> create_item(Post<"/items"> req, pylai::http::Response& res);
+	asio::awaitable<void> list_items(Get<"/items"> req, pylai::http::StringResponse& res);
+	asio::awaitable<void> create_item(Post<"/items"> req, pylai::http::StringResponse& res);
 
 	// HEAD 的钉子：`/both` 同时有 GET 与显式 `Head<>`（显式优先）；`/health` 只有 GET → HEAD 复用 GET。
-	asio::awaitable<void> both(Get<"/both"> req, pylai::http::Response& res);
-	asio::awaitable<void> both_head(Head<"/both"> req, pylai::http::Response& res);
+	asio::awaitable<void> both(Get<"/both"> req, pylai::http::StringResponse& res);
+	asio::awaitable<void> both_head(Head<"/both"> req, pylai::http::StringResponse& res);
 
 	// 请求体：框架读到 headers 就交棒，体由 handler 自己拉（`co_await req.body()`）。
-	asio::awaitable<void> echo_body(Post<"/body"> req, pylai::http::Response& res);
+	asio::awaitable<void> echo_body(Post<"/body"> req, pylai::http::StringResponse& res);
 	// 只读一部分体就返回：e2e 用它验“未读体 ⇒ Connection: close”。
-	asio::awaitable<void> peek_body(Post<"/peek"> req, pylai::http::Response& res);
+	asio::awaitable<void> peek_body(Post<"/peek"> req, pylai::http::StringResponse& res);
+
+	// 长度未知的响应：handler 在**运行期间**分段推（响应侧 chunked），结束时补 trailer。
+	asio::awaitable<void> stream(Get<"/stream"> req, pylai::http::UnknownLengthResponse& res);
 };
 
-asio::awaitable<void> App::health(Get<"/health">, pylai::http::Response& res)
+asio::awaitable<void> App::health(Get<"/health">, pylai::http::StringResponse& res)
 {
 	res.body = "ok\n";
 	co_return;
 }
 
-asio::awaitable<void> App::user(Get<"/users/{id}"> req, pylai::http::Response& res)
+asio::awaitable<void> App::user(Get<"/users/{id}"> req, pylai::http::StringResponse& res)
 {
 	res.body = "user id=" + std::to_string(req.param<int, "id">()) + "\n";
 	co_return;
 }
 
-asio::awaitable<void> App::submit(Post<"/submit/{id}"> req, pylai::http::Response& res)
+asio::awaitable<void> App::submit(Post<"/submit/{id}"> req, pylai::http::StringResponse& res)
 {
 	res.body = "submitted id=" + std::to_string(req.param<int, "id">()) + "\n";
 	co_return;
 }
 
-asio::awaitable<void> App::list_items(Get<"/items">, pylai::http::Response& res)
+asio::awaitable<void> App::list_items(Get<"/items">, pylai::http::StringResponse& res)
 {
 	res.body = "items\n";
 	co_return;
 }
 
-asio::awaitable<void> App::create_item(Post<"/items">, pylai::http::Response& res)
+asio::awaitable<void> App::create_item(Post<"/items">, pylai::http::StringResponse& res)
 {
 	res.body = "created\n";
 	co_return;
 }
 
-asio::awaitable<void> App::both(Get<"/both">, pylai::http::Response& res)
+asio::awaitable<void> App::both(Get<"/both">, pylai::http::StringResponse& res)
 {
 	res.body = "get\n";
 	co_return;
 }
 
-asio::awaitable<void> App::both_head(Head<"/both">, pylai::http::Response& res)
+asio::awaitable<void> App::both_head(Head<"/both">, pylai::http::StringResponse& res)
 {
 	res.body = "explicit-head\n"; // 长度与 GET 故意不同 → e2e 据此看出是谁应答的
 	co_return;
 }
 
 // 请求体：框架读到 headers 就交棒，体由 handler 自己拉（`co_await req.body()`，受 max_body_bytes 约束）。
-asio::awaitable<void> App::echo_body(Post<"/body"> req, pylai::http::Response& res)
+asio::awaitable<void> App::echo_body(Post<"/body"> req, pylai::http::StringResponse& res)
 {
 	const std::string body = co_await req.body();
 	res.body = "body=" + body;
@@ -85,12 +88,22 @@ asio::awaitable<void> App::echo_body(Post<"/body"> req, pylai::http::Response& r
 }
 
 // 只读一小段体就返回 —— e2e 用它验“未读体 ⇒ Connection: close”。
-asio::awaitable<void> App::peek_body(Post<"/peek"> req, pylai::http::Response& res)
+asio::awaitable<void> App::peek_body(Post<"/peek"> req, pylai::http::StringResponse& res)
 {
 	std::array<char, 4> head{};
 	const std::size_t n = co_await req.read_some(head);
 	res.body = "peek=" + std::string{head.data(), n};
 	co_return;
+}
+
+asio::awaitable<void> App::stream(Get<"/stream">, pylai::http::UnknownLengthResponse& res)
+{
+	res.declare_trailer("X-Chunks"); // 预告：Trailer: X-Chunks
+
+	co_await res.write("chunk-a\n");
+	co_await res.write("chunk-b\n");
+	const std::array trailers{pylai::http::Header{"X-Chunks", "2"}};
+	co_await res.finish(trailers);
 }
 
 } // namespace
@@ -104,7 +117,8 @@ int main()
 		                  .bind("127.0.0.1", 18080)
 			                  .max_body_bytes(1024) // 让 e2e 用 1 KiB 就能试到 413
 			                  .route_on(&app, &App::health, &App::user, &App::submit, &App::list_items,
-			                            &App::create_item, &App::both, &App::both_head, &App::echo_body, &App::peek_body)
+			                            &App::create_item, &App::both, &App::both_head, &App::echo_body, &App::peek_body,
+			                            &App::stream)
 		                  .build();
 		return server.run();
 	}

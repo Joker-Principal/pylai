@@ -2,14 +2,18 @@ module;
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <coroutine>
+#include <cstdint>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include <llhttp.h>
 
@@ -293,39 +297,160 @@ asio::awaitable<std::size_t> Request::read_some(std::span<char> out) const
 	co_return co_await body_reader->read_some(out);
 }
 
-std::string serialize(const Response& response, bool keep_alive, bool head_only)
+namespace {
+
+void append_header(std::string& out, std::string_view name, std::string_view value)
+{
+	out += name;
+	out += ": ";
+	out += value;
+	out += "\r\n";
+}
+
+// 16 进制块长（小写）+ CRLF + 载荷 + CRLF（RFC 9112 §7.1）。
+void append_chunk(std::string& out, std::string_view data)
+{
+	char size[16];
+	const auto result = std::to_chars(size, size + sizeof(size), data.size(), 16);
+	out.append(size, static_cast<std::size_t>(result.ptr - size));
+	out += "\r\n";
+	out += data;
+	out += "\r\n";
+}
+
+} // namespace
+
+std::string head_bytes(
+	int status,
+	std::string_view content_type,
+	std::span<const Header> headers,
+	std::optional<std::uint64_t> content_length,
+	bool chunked,
+	bool keep_alive,
+	std::span<const Header> trailer_names
+)
 {
 	std::string out;
-	out.reserve(response.body.size() + 128);
+	out.reserve(256);
 
 	out += "HTTP/1.1 ";
-	out += std::to_string(response.status);
+	out += std::to_string(status);
 	out += ' ';
-	out += status_text(response.status);
+	out += status_text(status);
 	out += "\r\n";
 
-	if(!response.content_type.empty())
+	if(!content_type.empty()) append_header(out, "Content-Type", content_type);
+	if(content_length) append_header(out, "Content-Length", std::to_string(*content_length));
+	if(chunked) append_header(out, "Transfer-Encoding", "chunked");
+
+	if(!trailer_names.empty())
 	{
-		out += "Content-Type: ";
-		out += response.content_type;
+		out += "Trailer: ";
+		for(std::size_t i = 0; i < trailer_names.size(); ++i)
+		{
+			if(i != 0) out += ", ";
+			out += trailer_names[i].name;
+		}
 		out += "\r\n";
 	}
 
-	for(const auto& header : response.headers)
-	{
-		out += header.name;
-		out += ": ";
-		out += header.value;
-		out += "\r\n";
-	}
+	for(const auto& header : headers) append_header(out, header.name, header.value);
+	append_header(out, "Connection", keep_alive ? "keep-alive" : "close");
 
-	out += "Content-Length: ";
-	out += std::to_string(response.body.size());
-	out += "\r\nConnection: ";
-	out += keep_alive ? "keep-alive" : "close";
-	out += "\r\n\r\n";
-	if(!head_only) out += response.body;
+	out += "\r\n"; // 头部结束
 	return out;
+}
+
+std::string chunk_bytes(std::string_view data)
+{
+	std::string out;
+	out.reserve(data.size() + 16);
+	append_chunk(out, data);
+	return out;
+}
+
+std::string last_chunk_bytes(std::span<const Header> trailers)
+{
+	std::string out;
+	out.reserve(64);
+	append_chunk(out, ""); // 终止块：0 CRLF
+	for(const auto& trailer : trailers) append_header(out, trailer.name, trailer.value);
+	out += "\r\n"; // trailer 段结束（无 trailer 时就是终止块后那个空行）
+	return out;
+}
+
+asio::awaitable<bool> StringResponse::send(ResponseWriter& out) const
+{
+	if(!co_await out.write(
+		   head_bytes(status, content_type, headers, std::uint64_t{body.size()}, false, out.keep_alive(), {})
+	   ))
+	{
+		co_return false;
+	}
+	if(out.head_only() || body.empty()) co_return true;
+	co_return co_await out.write(body);
+}
+
+asio::awaitable<bool> EmptyResponse::send(ResponseWriter& out) const
+{
+	// 204 / 304 / 1xx 是“无内容”，不得带 Content-Length（RFC 9110 §8.6）；
+	// 其它状态码只是“零长度内容”，必须写 Content-Length: 0 才能定界。
+	const bool no_content = status == 204 || status == 304 || (status >= 100 && status < 200);
+	const std::optional<std::uint64_t> length = no_content ? std::nullopt : std::optional<std::uint64_t>{0};
+
+	co_return co_await out.write(head_bytes(status, {}, headers, length, false, out.keep_alive(), {}));
+}
+
+void UnknownLengthResponse::declare_trailer(std::string_view name) { trailer_names.emplace_back(name); }
+
+asio::awaitable<bool> UnknownLengthResponse::write(std::string_view data)
+{
+	if(out == nullptr) co_return false;
+
+	if(!started)
+	{
+		started = true;
+		std::vector<Header> hint;
+		hint.reserve(trailer_names.size());
+		for(const std::string& name : trailer_names) hint.push_back({name, {}});
+		if(!co_await out->write(
+			   head_bytes(status, content_type, headers, std::nullopt, true, out->keep_alive(), hint)
+		   ))
+		{
+			co_return false;
+		}
+	}
+
+	// 空载荷不产生块："0\r\n\r\n" 是终止块，不是“空块”。
+	if(out->head_only() || data.empty()) co_return true;
+	co_return co_await out->write(chunk_bytes(data));
+}
+
+asio::awaitable<bool> UnknownLengthResponse::finish(std::span<const Header> trailers)
+{
+	if(finished) co_return true;
+	finished = true;
+	if(out == nullptr) co_return false;
+
+	if(!started)
+	{
+		started = true;
+		if(!co_await out->write(
+			   head_bytes(status, content_type, headers, std::nullopt, true, out->keep_alive(), trailers)
+		   ))
+		{
+			co_return false;
+		}
+	}
+
+	if(out->head_only()) co_return true; // HEAD：不应有体，也不发终止块
+	co_return co_await out->write(last_chunk_bytes(trailers));
+}
+
+asio::awaitable<bool> UnknownLengthResponse::send(ResponseWriter& writer)
+{
+	out = &writer; // 一个块都没推过时，得靠它才能把头（和 trailer）发出去
+	co_return co_await finish();
 }
 
 } // namespace pylai::http
