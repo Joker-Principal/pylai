@@ -50,12 +50,19 @@ auto server = pylai::Server::builder()
 > 📌 消费方要自己 `import asio;` —— handler 的返回类型就是 asio 的 awaitable；实例化 handler 的 TU 还要 `#include <coroutine>`（见 `modules.md`）。
 > 示例里的字符串用 `fmt::format` 拼 —— 第三方库不封 module，消费方自己 `#include <fmt/format.h>`（同一个 vcpkg 包，见 `modules.md`）。
 
+> ⚠️ **类型纪律：文本 vs 字节** ——
+> **文本**用 `std::string` / `std::string_view`（method / path / header 名值 / 错误消息）；
+> **字节**用 `std::span<const std::byte>` / `std::span<std::byte>` / `std::vector<std::byte>` —— 请求体、响应体、线上字节都归后者。
+> `std::byte` 不参与算术 ⇒ 不会有人拿二进制体当字符用；**不引入别名**（`std::span` 语义已足够明确）。
+> 要文本语义得**显式**转：`http::as_text(bytes)`；反方向用标准库的 `std::as_bytes(std::span{sv})`。
+> handler 写文本体不必转 —— `res.body("ok\n")` 走 `string_view` 重载（文本可当字节看，反之不行）。
+
 | 元素 | 说明 |
 |---|---|
 | **第一个形参** | 必须是 `Get<P>` / `Post<P>` / …：它在编译期给出动词与 path pattern，同时**就是请求**（本次请求的 method / path / headers 在它里面，`req.raw` 是框架解析出的 `http::Request`） |
 | `req.param<T, "名字">()` | 取一个命名捕获。**名字必写**，且在**编译期**对着 pattern 校对；整数走 `from_chars`，`std::string_view` 直通 |
-| `co_await req.body()` | 读完整个体（受 `max_body_bytes` 约束），返回 `std::string`；无体 ⇒ 空串 |
-| `co_await req.read_some(buf)` | 增量读一段（大文件 / SSE）；返回 0 = 体结束 |
+| `co_await req.body()` | 读完整个体（受 `max_body_bytes` 约束），返回 `std::vector<std::byte>`（**字节**，不是字符串），无体 ⇒ 空 |
+| `co_await req.read_some(buf)` | 增量读一段（大文件 / SSE），`buf` 是 `std::span<std::byte>`；返回 0 = 体结束 |
 | 响应形参（**必需**） | 声明本条路由产出哪种响应：`StringResponse&`（内存体）/ `EmptyResponse&`（无体）/ `UnknownLengthResponse&`（长度未知，边跑边推）。详见 §1.2 |
 | 返回类型 | 必须是 `asio::awaitable<void>` |
 | `Builder::route_on(&app, &App::m...)` | 一次注册整包；**每个动词一棵**编译期定容的树（不是一棵） |
@@ -92,7 +99,7 @@ auto server = pylai::Server::builder()
 
 | 类型 | 体在哪 | 定界 | 典型用途 |
 |---|---|---|---|
-| `http::StringResponse` | 内存里的 `std::string`（`body(块)` 追加） | `Content-Length` | 绝大多数接口 |
+| `http::StringResponse` | 内存里的字节（`body(块)` 追加） | `Content-Length` | 绝大多数接口 |
 | `http::EmptyResponse` | 无（**没有** `body()`） | 204 / 304 / 1xx：**不发** `Content-Length`；其它状态码发 `Content-Length: 0` | OPTIONS 204、304 |
 | `http::UnknownLengthResponse` | handler 边跑边推（`body(块)` + `flush()`） | **响应侧 chunked** | SSE / 大响应流 |
 

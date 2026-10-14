@@ -1,8 +1,11 @@
 #include <array>
 #include <coroutine>
+#include <cstddef>
 #include <cstdio>
 #include <exception>
+#include <span>
 #include <string>
+#include <vector>
 
 #include <fmt/format.h>
 
@@ -30,7 +33,7 @@ struct App
 	asio::awaitable<void> both(Get<"/both"> req, pylai::http::StringResponse& res);
 	asio::awaitable<void> both_head(Head<"/both"> req, pylai::http::StringResponse& res);
 
-	// 请求体：框架读到 headers 就交棒，体由 handler 自己拉（`co_await req.body()`）。
+	// 请求体：框架读到 headers 就交棒，体由 handler 自己拉（`co_await req.body()`，受 max_body_bytes 约束）。
 	asio::awaitable<void> echo_body(Post<"/body"> req, pylai::http::StringResponse& res);
 	// 只读一部分体就返回：e2e 用它验“未读体 ⇒ Connection: close”。
 	asio::awaitable<void> peek_body(Post<"/peek"> req, pylai::http::StringResponse& res);
@@ -74,19 +77,20 @@ asio::awaitable<void> App::both_head(Head<"/both">, pylai::http::StringResponse&
 	co_await res.body("explicit-head\n").flush(); // 长度与 GET 故意不同 → e2e 据此看出是谁应答的
 }
 
-// 请求体：框架读到 headers 就交棒，体由 handler 自己拉（`co_await req.body()`，受 max_body_bytes 约束）。
+// 请求体是**字节**（`std::vector<std::byte>`）；`as_text` 是“字节 → 文本”的显式转换。
 asio::awaitable<void> App::echo_body(Post<"/body"> req, pylai::http::StringResponse& res)
 {
-	const std::string body = co_await req.body();
-	co_await res.body("body=" + body).flush();
+	const std::vector<std::byte> body = co_await req.body();
+	co_await res.body(fmt::format("body={}", pylai::http::as_text(body))).flush();
 }
 
 // 只读一小段体就返回 —— e2e 用它验“未读体 ⇒ Connection: close”。
 asio::awaitable<void> App::peek_body(Post<"/peek"> req, pylai::http::StringResponse& res)
 {
-	std::array<char, 4> head{};
+	std::array<std::byte, 4> head{};
 	const std::size_t n = co_await req.read_some(head);
-	co_await res.body("peek=" + std::string{head.data(), n}).flush();
+	// 链着写两段：文本前缀 + 字节块（`body` 是追加）
+	co_await res.body("peek=").body(std::span{head}.first(n)).flush();
 }
 
 // 长度未知：一块一块推 —— 每次 `flush()` 才把攒下的字节发出去（写由 handler 驱动）。

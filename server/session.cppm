@@ -26,11 +26,11 @@ public:
 	static asio::awaitable<void> handle(const Settings& settings, const route::Router& routes, asio::ip::tcp::socket socket);
 
 	// http::BodyReader：把下一段体交给 handler（实现见 session.cpp）。
-	[[nodiscard]] asio::awaitable<std::size_t> read_some(std::span<char> out) override;
+	[[nodiscard]] asio::awaitable<std::size_t> read_some(std::span<std::byte> out) override;
 	[[nodiscard]] bool exhausted() const noexcept override { return body_finished; }
 
 	// http::ResponseWriter：带超时写一段字节（实现见 session.cpp）。空 error_code = 成功。
-	[[nodiscard]] asio::awaitable<std::error_code> write(std::string_view bytes) override;
+	[[nodiscard]] asio::awaitable<std::error_code> write(std::span<const std::byte> bytes) override;
 
 	// 响应类型在**发响应头之前**读这两个值：
 	// keep_alive —— 头一写出去就冻结（未读的请求体 ⇒ 只能 close）；head_only —— HEAD 抑制正文。
@@ -54,7 +54,7 @@ private:
 	std::string remote;
 	http::Parser parser;
 
-	std::array<char, 16 * 1024> buffer{};
+	std::array<std::byte, 16 * 1024> buffer{};
 	std::size_t buffered{0}; // buffer[0, buffered) 是尚未消费的字节
 
 	std::size_t body_read{0}; // 本请求已交付给 handler 的体字节数（chunked 的上限判定用）

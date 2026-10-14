@@ -268,8 +268,8 @@ co_await res.status(201).content_type("application/json").header("X-Trace", "abc
 
 | 方案 | 形态 | 结论 |
 |---|---|---|
-| ① **抽象基类** ✅ 已定 | `http::BodyReader`：`virtual awaitable<std::size_t> read_some(std::span<char>) = 0;` + `virtual bool exhausted() const;`；`http::Request` 持 `BodyReader*`（nullptr = 无体）。实现类就是 `Session` 自己。⚠️ **临时方案**：擦除点合并后会被重构掉 | 每次读一次虚调用，相对一次 `async_read_some` 可忽略 |
-| ② 函数指针表 | `{void* self; awaitable<std::size_t> (*fn)(void*, std::span<char>);}` | 同样的间接层，但要手工绑 `self`，一样省不下 |
+| ① **抽象基类** ✅ 已定 | `http::BodyReader`：`virtual awaitable<std::size_t> read_some(std::span<std::byte>) = 0;` + `virtual bool exhausted() const;`；`http::Request` 持 `BodyReader*`（nullptr = 无体）。实现类就是 `Session` 自己。⚠️ **临时方案**：擦除点合并后会被重构掉 | 每次读一次虚调用，相对一次 `async_read_some` 可忽略 |
+| ② 函数指针表 | `{void* self; awaitable<std::size_t> (*fn)(void*, std::span<std::byte>);}` | 同样的间接层，但要手工绑 `self`，一样省不下 |
 | ③ 交棒前把体读完 | — | 与“先路由再读体”直接矛盾（404/405 不该等体） |
 
 **A′. 写通道 `http::ResponseWriter`**（与 reader 同一套理由）：`virtual awaitable<std::error_code> write(std::string_view)` +
@@ -278,8 +278,14 @@ co_await res.status(201).content_type("application/json").header("X-Trace", "abc
 ⚠️ `Session` 同时实现这两个接口（`class Session : public http::BodyReader, public http::ResponseWriter`）——
 这正是 §11.2 C “擦除点合并”要收拾的东西。
 
-**B. 全量读与增量读**：`co_await req.body()` → `std::string`（受 `max_body_bytes` 约束）；
+**B. 全量读与增量读**：`co_await req.body()` → `std::vector<std::byte>`（受 `max_body_bytes` 约束）；
 `co_await req.read_some(buf)` 给大文件 / SSE（返回 0 = 体结束）。二者共用一个 reader。
+
+**B′. 文本 vs 字节（S1-R4 定）**：文本（method / path / header 名值 / 错误消息）用 `std::string` / `std::string_view`；
+**体与线上字节**用 `std::span<const std::byte>` / `std::span<std::byte>` / `std::vector<std::byte>` —— **不引入别名**（`std::span` 语义已明确）。
+⚠️ `std::byte` 不参与算术 ⇒ 不会有人拿二进制体当字符用。显式转换：`as_text(span<const std::byte>)` 与标准库的 `std::as_bytes`。
+与 C API 的 cast 边界只有 llhttp 一处（收 `const char*`）。
+便利性：`body(块)` 与 `text_response(...)` 都给了 `string_view` 重载 —— 文本可当字节看（子集），反之不行。
 
 **C. 上限与 413 前移**
 

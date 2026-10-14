@@ -20,6 +20,23 @@
 
 ## 阶段 1 · 框架形态定形
 
+- **2026-10-14 · S1-R4 · 文本与字节分开：字节一律走 `std::byte`** ✅ —— 用户要求“在项目中区分字符串 `string_view`/`string` 和字节串 `span<byte>`/`vector<byte>`”。
+  盘出的现状是：`Request::body()` 返回 `std::string`、`read_some` 收 `span<char>`、`ResponseWriter::write` 收 `string_view`、
+  成帧函数收 `string_view`、`Session::buffer` 是 `array<char>` —— 全都是“拿 char 当字节”。用户拍板三条：
+  ① 字节类型用 **`std::byte`**（不参与算术，谁也拿不走当字符用）；② **公开 API 与传输层一起改**；③ 便捷写法用**双重载**。
+  落地产出：接口直接用 `std::span<const std::byte>` / `std::span<std::byte>` / `std::vector<std::byte>` + `as_text(...)`
+  （显式的“换个看法”，反方向用标准库 `std::as_bytes`）。改了：`BodyReader::read_some`、`Request::body()`/`read_some`、
+  类型化 `Request` 的同名接口、`ResponseWriter::write`、`BodyResponse::body(块)`/`pending_`、`chunk_bytes`/`last_chunk_bytes`、
+  `Parser::execute`/`read_body`、`Session::buffer`/`read_some`/`write`、`route::text_response`、tests 的 `peek`/`echo`。
+  ⚠️ **保留文本的两处**（有意为之，不是漏改）：`head_bytes` 仍返回 `std::string` —— 头部**本来就是文本**（状态行 + 字段），
+  它在 `send_head` 里用 `std::as_bytes` 显式换成字节交给通道；`session.cpp` 的 `remote`、错误消息、`parser.error_reason()` 同理是文本。
+  ⚠️ **cast 边界只剩 llhttp 一处**（`const char*` 的 C API）：`Parser::execute` / `read_body` 各一次 `reinterpret_cast`，
+  代码里点明了“这是唯二必须 cast 的边界”；`asio::buffer` 对 `std::byte*` 是原生支持的，asio 侧零 cast。
+  便利性：`body(块)` 与 `text_response(...)` 都给 `string_view` 重载 —— 文本可以当字节看（子集关系），反方向不行（编译期就拦下）。
+  ⚠️ **修订（我多做了一步）**：我最初顺手加了三个别名（`http::Bytes` / `MutBytes` / `ByteBuf`），用户当即叫停 ——
+  **`std::span` 的语义已经足够明确，别名是多余抽象**。已删；接口与实现现在都写裸类型。
+  验收：构建退出码 0；e2e **29 条一字未改、全过**（`tests/http_e2e.py` 本次零改动）。复核：`cmake --build --preset debug_llvm` + `./tests/run.sh`。
+
 - **2026-10-14 · S1-R3 · 字符串构造统一走 fmt** ✅ —— 用户要求“改进所有的字符串格式化和非日志的打印，采用 fmt”。
   前置核实：`fmt` **12.2.0** 本来就在 `vcpkg.json` 里（`spdlog` 1.17.0 用的就是**外部** fmt —— `spdlog/tweakme.h` 里
   `SPDLOG_FMT_EXTERNAL` 已定义），所以**只有一份 fmt**，不存在与 spdlog 内置副本打架的问题；

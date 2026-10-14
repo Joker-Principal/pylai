@@ -25,6 +25,18 @@ struct Header
 	std::string value;
 };
 
+// ═══ 语义区分：文本 vs 字节（本库的类型纪律）═══
+// **文本**用 `std::string` / `std::string_view`（method / target / header 名值 / 错误消息 …）；
+// **字节**用 `std::span<const std::byte>`（只读）/ `std::span<std::byte>`（可写）/ `std::vector<std::byte>`（拥有）
+// —— 请求体 / 响应体 / 线上字节都归后者。`std::byte` 不参与算术 ⇒ 不会有人拿二进制体当字符用。
+
+// 字节 → 文本：**显式**转换（只是换个看法，不校验编码）。
+// 反方向用标准库的 `std::as_bytes(std::span{sv})` —— 不自己造。
+[[nodiscard]] inline std::string_view as_text(std::span<const std::byte> bytes) noexcept
+{
+	return {reinterpret_cast<const char*>(bytes.data()), bytes.size()};
+}
+
 // 读体的句柄：实现在连接层（`Session`），框架与 handler 只认这个接口。
 // 为何是抽象基类：`route::Handler` 已经类型擦除（`std::function<awaitable<Response>(const http::Request&)>`），
 // 句柄必须**非模板**。⚠️ 擦除点合并之后这里会被重构掉（见 docs/http-server-plan.md §11.2 C）。
@@ -38,7 +50,7 @@ public:
 
 	// 交付下一段请求体（chunked 的块边界已由 llhttp 剥掉）：写进 out，返回写入字节数；
 	// 0 = 体已到尾。out 不得为空（否则 std::invalid_argument）；失败抛 BodyError。
-	virtual asio::awaitable<std::size_t> read_some(std::span<char> out) = 0;
+	virtual asio::awaitable<std::size_t> read_some(std::span<std::byte> out) = 0;
 
 	// 本请求的体是否已读完 —— 框架据此判“未读体 ⇒ Connection: close”。
 	[[nodiscard]] virtual bool exhausted() const noexcept = 0;
@@ -79,10 +91,10 @@ struct Request
 	// 这个请求有没有体（框架用来决定要不要让 llhttp 继续走完消息）。
 	[[nodiscard]] bool has_body() const noexcept { return chunked || content_length > 0; }
 
-	// 读完整个体（受 max_body_bytes 约束）；无体 ⇒ 空串。
-	[[nodiscard]] asio::awaitable<std::string> body() const;
+	// 读完整个体（受 `max_body_bytes` 约束）；无体 ⇒ 空。
+	[[nodiscard]] asio::awaitable<std::vector<std::byte>> body() const;
 	// 增量读一段（大文件 / SSE 用）；返回 0 = 体结束。
-	asio::awaitable<std::size_t> read_some(std::span<char> out) const;
+	asio::awaitable<std::size_t> read_some(std::span<std::byte> out) const;
 };
 
 // 写响应时可能出的错：`std::error_code` + 自定义 category（空 error_code = 成功）。
@@ -107,7 +119,7 @@ public:
 	ResponseWriter& operator=(const ResponseWriter&) = delete;
 
 	// 写一段线上字节（带超时）。返回空 error_code = 成功；否则是 `WriteErrc` ⇒ 这个响应已经没救了。
-	virtual asio::awaitable<std::error_code> write(std::string_view bytes) = 0;
+	virtual asio::awaitable<std::error_code> write(std::span<const std::byte> bytes) = 0;
 
 	// ⚠️这两项要在**发响应头之前**读，且只反映“此刻”：
 	// keep_alive —— 头一写出去就冻结（未读的请求体 ⇒ 只能 close）；head_only —— HEAD 抑制正文。
@@ -116,6 +128,8 @@ public:
 };
 
 // 成帧：纯函数（不碰 socket）。与通道分开，是为了让“头部 / 块 / 末块”的字节能单独测。
+// ⚠️ `head_bytes` 返回 `std::string`：头部本来就是**文本**（状态行 + 字段）；
+// `chunk_bytes` / `last_chunk_bytes` 返回**字节**：里面有调用方给的载荷字节。
 // content_length 有值 → `Content-Length`；chunked → `Transfer-Encoding: chunked`；
 // trailer_names 非空 → `Trailer:` 预告（RFC 9110 §6.6.2，SHOULD）。
 std::string head_bytes(
@@ -127,8 +141,8 @@ std::string head_bytes(
 	bool keep_alive,
 	std::span<const Header> trailer_names
 );
-std::string chunk_bytes(std::string_view data);
-std::string last_chunk_bytes(std::span<const Header> trailers);
+std::vector<std::byte> chunk_bytes(std::span<const std::byte> data);
+std::vector<std::byte> last_chunk_bytes(std::span<const Header> trailers);
 
 // 响应已经写到哪一步 —— 状态机的依据。顺序错的动作 ⇒ 抛 `std::logic_error`（消息里点名动作）。
 enum class Stage : std::uint8_t
@@ -217,9 +231,11 @@ protected:
 		hint.reserve(trailer_names_.size());
 		for(const std::string& name : trailer_names_) hint.push_back({name, {}});
 
-		const auto ec = co_await out_->write(
-			head_bytes(status_, content_type_, headers_, content_length, chunked, out_->keep_alive(), hint)
+		const auto head = head_bytes(
+			status_, content_type_, headers_, content_length, chunked, out_->keep_alive(), hint
 		);
+		// 头部是文本，通道收的是字节 —— 在这里显式换看法。
+		const auto ec = co_await out_->write(std::as_bytes(std::span{head}));
 		if(!ec) stage_ = Stage::head_sent;
 		co_return ec;
 	}
@@ -233,6 +249,7 @@ protected:
 };
 
 // 有体的响应：`body(块)` 只是**往内存里追加**，出网是 flush / finish 的事（写由 handler 驱动）。
+// 块是**字节**；文本写法另给一个 `string_view` 重载 —— 文本可以当字节看（子集），反之不行。
 // streaming = false：头里写死了 `Content-Length` ⇒ 头一发出就不许再追加。
 template <typename Derived, bool streaming>
 class BodyResponse : public ResponseBase<Derived>
@@ -240,7 +257,26 @@ class BodyResponse : public ResponseBase<Derived>
 public:
 	using ResponseBase<Derived>::self;
 
-	Derived& body(std::string_view data)
+	Derived& body(std::span<const std::byte> data)
+	{
+		require_appendable();
+		pending_.insert(pending_.end(), data.begin(), data.end());
+		return self();
+	}
+
+	// 文本当体（零拷贝：只是换个看法）—— handler 里 `res.body("ok\n")` 走这个。
+	Derived& body(std::string_view text) { return body(std::as_bytes(std::span{text})); }
+
+	// 还没发出去的体（定长类型 = 整个体）。
+	[[nodiscard]] std::span<const std::byte> body() const noexcept { return pending_; }
+
+protected:
+	BodyResponse() = default;
+
+	std::vector<std::byte> pending_{};
+
+private:
+	void require_appendable() const
 	{
 		if constexpr(streaming)
 		{
@@ -250,17 +286,7 @@ public:
 		{
 			this->require_config("body");
 		}
-		pending_ += data;
-		return self();
 	}
-
-	// 还没发出去的体（定长类型 = 整个体）。
-	[[nodiscard]] std::string_view body() const noexcept { return pending_; }
-
-protected:
-	BodyResponse() = default;
-
-	std::string pending_{};
 };
 
 // 有体、长度已知：长度就是 `body()` 攒下的字节数 ⇒ `Content-Length` 定界。
@@ -328,7 +354,7 @@ public:
 
 	// **头部阶段**：喂字节直到 headers_complete（无体请求会一路走到 message_complete）。
 	// 返回后调用方应从缓冲区头部摘掉 consumed 字节。
-	ParseStatus execute(const char* data, std::size_t length, std::size_t& consumed);
+	ParseStatus execute(std::span<const std::byte> data, std::size_t& consumed);
 
 	// **体阶段**：载荷**直接写进 out**（最多 out.size() 字节，不缓存在 Parser 里）。
 	struct BodyStep
@@ -339,7 +365,7 @@ public:
 		bool failed{false};		  // 协议错误 —— error_reason() 里有原因
 	};
 
-	[[nodiscard]] BodyStep read_body(const char* data, std::size_t length, std::span<char> out);
+	[[nodiscard]] BodyStep read_body(std::span<const std::byte> data, std::span<std::byte> out);
 
 	// 解除 headers_complete / message_complete 处的暂停（下一次 execute 前调用）。
 	void resume();

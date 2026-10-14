@@ -64,7 +64,7 @@ struct Parser::Impl
 	std::string reason;
 
 	// 体阶段的交付去处（由 read_body 每次设好；载荷不缓存在这里）。
-	std::span<char> sink{};
+	std::span<std::byte> sink{};
 	std::size_t delivered{0};
 
 	bool paused_on_headers{false};
@@ -203,7 +203,7 @@ Parser::~Parser() = default;
 Parser::Parser(Parser&&) noexcept = default;
 Parser& Parser::operator=(Parser&&) noexcept = default;
 
-ParseStatus Parser::execute(const char* data, std::size_t length, std::size_t& consumed)
+ParseStatus Parser::execute(std::span<const std::byte> data, std::size_t& consumed)
 {
 	impl->paused_on_headers = false;
 	impl->paused_on_message = false;
@@ -211,7 +211,9 @@ ParseStatus Parser::execute(const char* data, std::size_t length, std::size_t& c
 	impl->delivered = 0;
 
 	consumed = 0;
-	const llhttp_errno_t err = llhttp_execute(&impl->handle, data, length);
+	// llhttp 是 C API（收 `const char*`）—— 这是唯二必须 cast 的边界之一（另一处在 `read_body`）。
+	const char* const base = reinterpret_cast<const char*>(data.data());
+	const llhttp_errno_t err = llhttp_execute(&impl->handle, base, data.size());
 
 	if(err == HPE_OK) return ParseStatus::incomplete; // 输入耗尽，但消息还没完
 
@@ -227,7 +229,7 @@ ParseStatus Parser::execute(const char* data, std::size_t length, std::size_t& c
 	{
 		// PAUSED 时 error_pos 指向停下的位置（实测），相减即本次消费掉的字节数。
 		const char* position = llhttp_get_error_pos(&impl->handle);
-		consumed = position != nullptr ? static_cast<std::size_t>(position - data) : length;
+		consumed = position != nullptr ? static_cast<std::size_t>(position - base) : data.size();
 		return impl->paused_on_message ? ParseStatus::message_complete : ParseStatus::headers_complete;
 	}
 
@@ -235,7 +237,7 @@ ParseStatus Parser::execute(const char* data, std::size_t length, std::size_t& c
 	return ParseStatus::error;
 }
 
-Parser::BodyStep Parser::read_body(const char* data, std::size_t length, std::span<char> out)
+Parser::BodyStep Parser::read_body(std::span<const std::byte> data, std::span<std::byte> out)
 {
 	BodyStep step;
 	impl->sink = out;
@@ -244,8 +246,9 @@ Parser::BodyStep Parser::read_body(const char* data, std::size_t length, std::sp
 	impl->paused_on_message = false;
 
 	// 夹到 out.size()：llhttp 交给 on_body 的载荷是输入的子区间 ⇒ 保证它一定放得下。
-	const std::size_t window = std::min(length, out.size());
-	const llhttp_errno_t err = llhttp_execute(&impl->handle, data, window);
+	const std::size_t window = std::min(data.size(), out.size());
+	const char* const base = reinterpret_cast<const char*>(data.data());
+	const llhttp_errno_t err = llhttp_execute(&impl->handle, base, window);
 	step.delivered = impl->delivered;
 	impl->sink = {};
 
@@ -259,7 +262,7 @@ Parser::BodyStep Parser::read_body(const char* data, std::size_t length, std::sp
 	{
 		// 体阶段只会在 message_complete 处停（下一个请求的头部不会再进到本次调用里）。
 		const char* position = llhttp_get_error_pos(&impl->handle);
-		step.consumed = position != nullptr ? static_cast<std::size_t>(position - data) : window;
+		step.consumed = position != nullptr ? static_cast<std::size_t>(position - base) : window;
 		step.finished = impl->paused_on_message;
 		return step;
 	}
@@ -276,24 +279,24 @@ Request& Parser::current() { return impl->request; }
 
 std::string_view Parser::error_reason() const { return impl->reason; }
 
-asio::awaitable<std::string> Request::body() const
+asio::awaitable<std::vector<std::byte>> Request::body() const
 {
-	std::string out;
+	std::vector<std::byte> out;
 	if(body_reader == nullptr) co_return out;
 	if(has_content_length) out.reserve(static_cast<std::size_t>(content_length));
 
-	std::array<char, 8 * 1024> chunk{};
+	std::array<std::byte, 8 * 1024> chunk{};
 	for(;;)
 	{
 		const std::size_t n = co_await body_reader->read_some(chunk);
 		if(n == 0) break;
-		out.append(chunk.data(), n);
+		out.insert(out.end(), chunk.data(), chunk.data() + n);
 	}
 
 	co_return out;
 }
 
-asio::awaitable<std::size_t> Request::read_some(std::span<char> out) const
+asio::awaitable<std::size_t> Request::read_some(std::span<std::byte> out) const
 {
 	if(body_reader == nullptr) co_return 0;
 	co_return co_await body_reader->read_some(out);
@@ -306,10 +309,19 @@ void append_header(std::string& out, std::string_view name, std::string_view val
 	fmt::format_to(std::back_inserter(out), "{}: {}\r\n", name, value);
 }
 
-// 16 进制块长（小写）+ CRLF + 载荷 + CRLF（RFC 9112 §7.1）。
-void append_chunk(std::string& out, std::string_view data)
+// 协议文本 → 字节缓冲。fmt 只能往 char 缓冲写，所以这一步免不了；
+// 但协议文本全是 ASCII ⇒ 换个人称直接追加即可，不需要真转换。
+void append_text(std::vector<std::byte>& out, std::string_view text)
 {
-	fmt::format_to(std::back_inserter(out), "{:x}\r\n{}\r\n", data.size(), data);
+	out.insert(
+		out.end(), reinterpret_cast<const std::byte*>(text.data()),
+		reinterpret_cast<const std::byte*>(text.data() + text.size())
+	);
+}
+
+void append_header(std::vector<std::byte>& out, std::string_view name, std::string_view value)
+{
+	append_text(out, fmt::format("{}: {}\r\n", name, value));
 }
 
 } // namespace
@@ -349,21 +361,23 @@ std::string head_bytes(
 	return out;
 }
 
-std::string chunk_bytes(std::string_view data)
+std::vector<std::byte> chunk_bytes(std::span<const std::byte> data)
 {
-	std::string out;
-	out.reserve(data.size() + 16);
-	append_chunk(out, data);
+	// 16 进制块长（小写）+ CRLF + 载荷 + CRLF（RFC 9112 §7.1）。
+	std::vector<std::byte> out;
+	out.reserve(data.size() + 24);
+	append_text(out, fmt::format("{:x}\r\n", data.size()));
+	out.insert(out.end(), data.begin(), data.end());
+	append_text(out, "\r\n");
 	return out;
 }
 
-std::string last_chunk_bytes(std::span<const Header> trailers)
+std::vector<std::byte> last_chunk_bytes(std::span<const Header> trailers)
 {
-	std::string out;
-	out.reserve(64);
-	append_chunk(out, ""); // 终止块：0 CRLF
+	std::vector<std::byte> out;
+	append_text(out, "0\r\n"); // 终止块
 	for(const auto& trailer : trailers) append_header(out, trailer.name, trailer.value);
-	out += "\r\n"; // trailer 段结束（无 trailer 时就是终止块后那个空行）
+	append_text(out, "\r\n"); // trailer 段结束（无 trailer 时就是终止块后那个空行）
 	return out;
 }
 

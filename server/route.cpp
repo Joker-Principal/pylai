@@ -3,6 +3,7 @@ module;
 #include <algorithm>
 #include <coroutine>
 #include <cstdint>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -21,11 +22,17 @@ namespace pylai::route {
 
 namespace {
 
-[[nodiscard]] http::StringResponse text_response(int status, std::string body)
+// 字节版（体本来是字节）；文本写法另给一个 `string_view` 重载 —— 与 `res.body(...)` 同一个策略。
+[[nodiscard]] http::StringResponse text_response(int status, std::span<const std::byte> body)
 {
 	http::StringResponse response;
 	response.status(status).body(body);
 	return response;
+}
+
+[[nodiscard]] http::StringResponse text_response(int status, std::string_view body)
+{
+	return text_response(status, std::as_bytes(std::span{body}));
 }
 
 // 一条 path 上已注册的动词（按注册顺序，逗号分隔），给 405 / OPTIONS 的 `Allow` 用。

@@ -142,7 +142,7 @@ asio::awaitable<bool> Session::read_headers()
 		if(buffered > 0)
 		{
 			std::size_t consumed = 0;
-			const auto status = parser.execute(buffer.data(), buffered, consumed);
+			const auto status = parser.execute(std::span{buffer}.first(buffered), consumed);
 
 			switch(status)
 			{
@@ -185,7 +185,7 @@ asio::awaitable<bool> Session::finish_message()
 	while(!message_done)
 	{
 		std::size_t consumed = 0;
-		const auto status = parser.execute(buffer.data(), buffered, consumed);
+		const auto status = parser.execute(std::span{buffer}.first(buffered), consumed);
 		if(consumed > 0) consume(consumed);
 
 		switch(status)
@@ -215,7 +215,7 @@ asio::awaitable<bool> Session::finish_message()
 // http::BodyReader 的实现：把 llhttp 的体载荷拉出来交给 handler。
 // 每次最多交付 out.size() 字节 —— 这同时把"每次喂给 llhttp 的输入窗口"限死了，
 // 于是 on_body 拿到的载荷一定放得下（见 docs/http-server-plan.md §4.1.2 E）。
-asio::awaitable<std::size_t> Session::read_some(std::span<char> out)
+asio::awaitable<std::size_t> Session::read_some(std::span<std::byte> out)
 {
 	if(out.empty()) throw std::invalid_argument{"Session::read_some: empty buffer"};
 
@@ -225,7 +225,7 @@ asio::awaitable<std::size_t> Session::read_some(std::span<char> out)
 
 		if(buffered > 0)
 		{
-			const auto step = parser.read_body(buffer.data(), buffered, out);
+			const auto step = parser.read_body(std::span{buffer}.first(buffered), out);
 
 			if(step.failed) throw http::BodyError{400, std::string{parser.error_reason()}};
 
@@ -281,7 +281,7 @@ asio::awaitable<bool> Session::fill_buffer()
 	co_return true;
 }
 
-asio::awaitable<std::error_code> Session::write(std::string_view text)
+asio::awaitable<std::error_code> Session::write(std::span<const std::byte> bytes)
 {
 	if(!head_written)
 	{
@@ -295,7 +295,7 @@ asio::awaitable<std::error_code> Session::write(std::string_view text)
 
 	const auto result = co_await (
 		timer.async_wait(asio::as_tuple(asio::use_awaitable))
-		|| asio::async_write(socket, asio::buffer(text.data(), text.size()), asio::as_tuple(asio::use_awaitable))
+		|| asio::async_write(socket, asio::buffer(bytes.data(), bytes.size()), asio::as_tuple(asio::use_awaitable))
 	);
 
 	if(result.index() == 0)
