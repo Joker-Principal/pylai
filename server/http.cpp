@@ -54,7 +54,7 @@ std::string_view status_text(int status)
 
 } // namespace
 
-struct Parser::Impl
+struct RequestParser::Impl
 {
 	llhttp_t handle{};
 	Request request;
@@ -192,18 +192,18 @@ struct Parser::Impl
 	}
 };
 
-Parser::Parser(std::size_t max_body_bytes) : impl(std::make_unique<Impl>())
+RequestParser::RequestParser(std::size_t max_body_bytes) : impl(std::make_unique<Impl>())
 {
 	impl->max_body_bytes = max_body_bytes;
 	llhttp_init(&impl->handle, HTTP_REQUEST, &Impl::settings());
 	impl->handle.data = impl.get();
 }
 
-Parser::~Parser() = default;
-Parser::Parser(Parser&&) noexcept = default;
-Parser& Parser::operator=(Parser&&) noexcept = default;
+RequestParser::~RequestParser() = default;
+RequestParser::RequestParser(RequestParser&&) noexcept = default;
+RequestParser& RequestParser::operator=(RequestParser&&) noexcept = default;
 
-ParseStatus Parser::execute(std::span<const std::byte> data, std::size_t& consumed)
+ParseStatus RequestParser::execute(std::span<const std::byte> data, std::size_t& consumed)
 {
 	impl->paused_on_headers = false;
 	impl->paused_on_message = false;
@@ -237,7 +237,7 @@ ParseStatus Parser::execute(std::span<const std::byte> data, std::size_t& consum
 	return ParseStatus::error;
 }
 
-Parser::BodyStep Parser::read_body(std::span<const std::byte> data, std::span<std::byte> out)
+RequestParser::BodyStep RequestParser::read_body(std::span<const std::byte> data, std::span<std::byte> out)
 {
 	BodyStep step;
 	impl->sink = out;
@@ -272,12 +272,12 @@ Parser::BodyStep Parser::read_body(std::span<const std::byte> data, std::span<st
 	return step;
 }
 
-void Parser::resume() { llhttp_resume(&impl->handle); }
+void RequestParser::resume() { llhttp_resume(&impl->handle); }
 
-const Request& Parser::current() const { return impl->request; }
-Request& Parser::current() { return impl->request; }
+const Request& RequestParser::current() const { return impl->request; }
+Request& RequestParser::current() { return impl->request; }
 
-std::string_view Parser::error_reason() const { return impl->reason; }
+std::string_view RequestParser::error_reason() const { return impl->reason; }
 
 asio::awaitable<std::vector<std::byte>> read_body(BodyReader& in, std::uint64_t reserve_hint)
 {

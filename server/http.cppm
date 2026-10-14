@@ -411,23 +411,23 @@ enum class ParseStatus
 	error,			  // 协议错误
 };
 
-class Parser
+class RequestParser
 {
 public:
 	// max_body_bytes：请求体上限。声明的 Content-Length 超上限 ⇒ execute() 返回 too_large。
-	explicit Parser(std::size_t max_body_bytes);
-	~Parser();
+	explicit RequestParser(std::size_t max_body_bytes);
+	~RequestParser();
 
-	Parser(Parser&&) noexcept;
-	Parser& operator=(Parser&&) noexcept;
-	Parser(const Parser&) = delete;
-	Parser& operator=(const Parser&) = delete;
+	RequestParser(RequestParser&&) noexcept;
+	RequestParser& operator=(RequestParser&&) noexcept;
+	RequestParser(const RequestParser&) = delete;
+	RequestParser& operator=(const RequestParser&) = delete;
 
 	// **头部阶段**：喂字节直到 headers_complete（无体请求会一路走到 message_complete）。
 	// 返回后调用方应从缓冲区头部摘掉 consumed 字节。
 	ParseStatus execute(std::span<const std::byte> data, std::size_t& consumed);
 
-	// **体阶段**：载荷**直接写进 out**（最多 out.size() 字节，不缓存在 Parser 里）。
+	// **体阶段**：载荷**直接写进 out**（最多 out.size() 字节，不缓存在 RequestParser 里）。
 	struct BodyStep
 	{
 		std::size_t consumed{0};  // 本次消费的输入字节数
