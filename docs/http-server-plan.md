@@ -62,6 +62,8 @@
 | 缺口 | 挂点 | 为何现在不做 |
 |---|---|---|
 | TLS | 连接层包装（`Session` 之外） | MU 只服务 clio（本地） |
+| 传输层多变体（ssl / 带流量统计的 socket） | **`Session` 将来是模板**（`Session<Sock>`）—— 不依赖现状改任何东西：通道接口里**一个 socket 类型都没有**，`get_executor()` 返回 `any_io_executor`（executor 也已擦除）⇒ handler 侧零改动。⚠️ `standalone/asio/ssl.cppm` 分区已存在，但 `import asio;` **不含 ssl**（将来要单独 import 那一片） | 现在只做一种 socket |
+| 擦除形式的替换（虚基类 → `proxy` 库） | 两侧通道接口（`BodyReader` / `ResponseWriter`） | 见 §4.1.2 A‴：`proxy` 是“另一种擦除形式”，不是“去掉擦除”；收益有限（实现类就是自己的 `Session`，继承成本≈零） |
 | WebSocket | `req` 的升级语义（§4.1.1） | 与形态无关，随时可加 |
 | 中间件洋葱 | `route_on` 的链式包装 | 等第二个真实用例 |
 | 静态 / 大文件响应 | 响应类型（§4.1.1 的 `FileResponse`） | 公网那一轮 |
@@ -284,6 +286,19 @@ co_await res.status(201).content_type("application/json").header("X-Trace", "abc
 门面还负责三处语义适配：内部 `0` → asio 的 `eof`；`BodyError` → `BodyErrc`（`value()` 就是 HTTP 状态码）；
 读只填第一段、写一次写完整块（均比概念要求更强）。
 
+**A‴. 擦除形式：为什么是虚基类，以及为什么“让 `Request`/响应直接封装 `Session`”不行**（2026-10-14 评估）：
+
+| 方案 | 结论 |
+|---|---|
+| ✅ **虚基类**（现状） | 通道接口里**一个 socket 类型都没有**、`get_executor()` 返回 `any_io_executor`（executor 也已擦除）⇒ **`Session` 将来模板化成 `Session<Sock>`（ssl / 带统计的 socket 包装）时，handler 侧与响应类型零改动** |
+| ❌ `http::Request` / 响应对象**直接持有 `Session&`** | `:http` 就要 import `:session`，而 `:session` 已 import `:http` + `:route`、`:route` 又 import `:http` ⇒ 三方环 + 分层倒置（协议层反过来认识连接层）。同模块分区之间的环标准允许，但 `:http` 能独立复用/单测的性质就没了 |
+| ❌ 改成模板（`Request<Session>`） | 它会出现在擦除单元的参数位（`VerbRoutes::invoke` 是 `std::function` ⇒ 参数**必须非模板**）⇒ `VerbRoutes` → `Router` → `Server` 全得模板化，与“`Server` 保持非模板单类型”冲突 |
+| ❌ 手绑调用表（`void*` + 函数指针） | 同样的间接层，还要手工绑 `self`（方案②）—— 一样省不下 |
+| 🟡 `proxy` 库（microsoft/proxy 4） | header-only C++20（clang ≥ 16）、非侵入式（实现类不必继承）、可值语义 / 就地存储、显式控制分配。**但它是“另一种擦除形式”，不是“去掉擦除”**；我们的实现类就是自己的 `Session`（继承成本≈零），通道又是引用语义 ⇒ **收益有限，暂不做**（vcpkg 有端口 `proxy` 4.1.0，homepage 指向 `ngcpp/proxy`）。真要换的时机：需要擦除**第三方/外部**类型，或需要值语义 / 就地存储 |
+
+⚠️ **两个 `Request` 别混淆**：`http::Request`（解析结果 + 读体通道，框架内部）与 `route::Request<verb, pattern>`（handler 的第一个形参）是两回事。
+handler 看到的响应形参是**具体类型**（`StringResponse` 等，编译期分派、响应侧零虚函数），**只有两侧通道**是擦除接口。
+
 **B. 全量读与增量读**：`co_await req.body()` → `std::vector<std::byte>`（受 `max_body_bytes` 约束）；
 `co_await req.read_some(buf)` 给大文件 / SSE（返回 0 = 体结束）。二者共用一个 reader。
 
@@ -342,8 +357,8 @@ e2e 已各加一条用例（handler 完全不读 / 读一半）看真实表现�
   🟡 **待复核**：handler 内部的嵌套 `co_await` 是否继承该 slot（“`stop()` 能打断正在读体的 handler”目前没有测试钉住）。
 - **不做请求总时限** ✅：handler 的业务时间不该被框架掐；慢 handler 占连接的问题交给 Stage 2 的准入控制（§5.5）。
 
-| **缓冲归属** ✅ **不新增 per-request 缓冲** —— 仍以 `Session::buffer`（`std::array<char, 16*1024>`，`server/session.cppm:47`）为唯一读暂存区；
-`body()` 把载荷 append 进 `std::string`（受上限约束 ⇒ **每请求分配次数可数**，对齐 §1.3 的性能底口径）。更细的分配器边界留给 §8。
+| **缓冲归属** ✅ **不新增 per-request 缓冲** —— 仍以 `Session::buffer`（`std::array<std::byte, 16*1024>`，`server/session.cppm`）为唯一读暂存区；
+`body()` 把载荷 append 进 `std::vector<std::byte>`（受上限约束 ⇒ **每请求分配次数可数**，对齐 §1.3 的性能底口径）。更细的分配器边界留给 §8。
 
 **H. 额外收益：背压天然到手** —— 拉取式 ⇒ 框架只在 handler 要字节时才读 socket，不会“读太快把内存塞满”。
 唯一例外是 `body()`（受上限约束）。
