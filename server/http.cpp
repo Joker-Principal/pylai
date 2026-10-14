@@ -2,12 +2,13 @@ module;
 
 #include <algorithm>
 #include <array>
-#include <charconv>
 #include <coroutine>
 #include <cstdint>
 #include <cstring>
+#include <iterator>
 #include <memory>
 #include <optional>
+#include <ranges>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -15,6 +16,8 @@ module;
 #include <utility>
 #include <vector>
 
+#include <fmt/format.h>
+#include <fmt/ranges.h>
 #include <llhttp.h>
 
 module pylai;
@@ -114,8 +117,7 @@ struct Parser::Impl
 		auto& req = owner->request;
 
 		req.method = llhttp_method_name(static_cast<llhttp_method_t>(parser->method));
-		req.version =
-			std::string{"HTTP/"} + std::to_string(parser->http_major) + "." + std::to_string(parser->http_minor);
+		req.version = fmt::format("HTTP/{}.{}", parser->http_major, parser->http_minor);
 		req.content_length = parser->content_length;
 		req.has_content_length = (parser->flags & F_CONTENT_LENGTH) != 0;
 		req.chunked = (parser->flags & F_CHUNKED) != 0;
@@ -301,21 +303,13 @@ namespace {
 
 void append_header(std::string& out, std::string_view name, std::string_view value)
 {
-	out += name;
-	out += ": ";
-	out += value;
-	out += "\r\n";
+	fmt::format_to(std::back_inserter(out), "{}: {}\r\n", name, value);
 }
 
 // 16 进制块长（小写）+ CRLF + 载荷 + CRLF（RFC 9112 §7.1）。
 void append_chunk(std::string& out, std::string_view data)
 {
-	char size[16];
-	const auto result = std::to_chars(size, size + sizeof(size), data.size(), 16);
-	out.append(size, static_cast<std::size_t>(result.ptr - size));
-	out += "\r\n";
-	out += data;
-	out += "\r\n";
+	fmt::format_to(std::back_inserter(out), "{:x}\r\n{}\r\n", data.size(), data);
 }
 
 } // namespace
@@ -333,25 +327,19 @@ std::string head_bytes(
 	std::string out;
 	out.reserve(256);
 
-	out += "HTTP/1.1 ";
-	out += std::to_string(status);
-	out += ' ';
-	out += status_text(status);
-	out += "\r\n";
+	fmt::format_to(std::back_inserter(out), "HTTP/1.1 {} {}\r\n", status, status_text(status));
 
 	if(!content_type.empty()) append_header(out, "Content-Type", content_type);
-	if(content_length) append_header(out, "Content-Length", std::to_string(*content_length));
+	if(content_length) append_header(out, "Content-Length", fmt::to_string(*content_length));
 	if(chunked) append_header(out, "Transfer-Encoding", "chunked");
 
 	if(!trailer_names.empty())
 	{
-		out += "Trailer: ";
-		for(std::size_t i = 0; i < trailer_names.size(); ++i)
-		{
-			if(i != 0) out += ", ";
-			out += trailer_names[i].name;
-		}
-		out += "\r\n";
+		// 预告：只要名字，值在末块之后补（RFC 9110 §6.6.2）。
+		fmt::format_to(
+			std::back_inserter(out), "Trailer: {}\r\n",
+			fmt::join(trailer_names | std::views::transform(&Header::name), ", ")
+		);
 	}
 
 	for(const auto& header : headers) append_header(out, header.name, header.value);

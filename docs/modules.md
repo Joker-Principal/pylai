@@ -101,4 +101,4 @@ but is currently enabled; … cannot be loaded due to a configuration mismatch
 ## 相关
 
 - 应用代码只 `import asio;`，不 `#include <asio/...>` —— 见 `server/README.md`。
-- 第三方库**不封 module**（spdlog / llhttp 直接 include）—— 见 `server/CMakeLists.txt`。
+- 第三方库**不封 module**（spdlog / fmt / llhttp 直接 include）—— 见 `server/CMakeLists.txt`。

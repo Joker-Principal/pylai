@@ -1,11 +1,15 @@
 module;
 
+#include <algorithm>
 #include <coroutine>
 #include <cstdint>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
+
+#include <fmt/format.h>
+#include <fmt/ranges.h>
 
 module pylai;
 
@@ -36,18 +40,20 @@ namespace {
 	{
 		if(route.match(path, scratch) == k_no_route) continue;
 
+		if(route.verb == "HEAD") has_head = true;
+		// 先按注册顺序摊平，最后一次性 join —— HEAD 得紧跟在 GET 后面。
 		verbs.push_back(route.verb);
-		has_head = has_head || route.verb == "HEAD";
 	}
 
-	std::string out;
-	for(const std::string_view verb : verbs)
+	// 补 HEAD：GET 的隐含搭档，位置紧跟 GET（RFC 9110 §9.3.2）。放在了摊平之后，
+	// 是因为只有看完整条清单才知道有没有显式 `Head<>`。
+	if(!has_head)
 	{
-		if(!out.empty()) out += ", ";
-		out += verb;
-		if(verb == "GET" && !has_head) out += ", HEAD";
+		const auto get = std::find(verbs.begin(), verbs.end(), "GET");
+		if(get != verbs.end()) verbs.insert(get + 1, "HEAD");
 	}
-	return out;
+
+	return fmt::format("{}", fmt::join(verbs, ", "));
 }
 
 } // namespace

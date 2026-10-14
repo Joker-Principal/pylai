@@ -20,6 +20,20 @@
 
 ## 阶段 1 · 框架形态定形
 
+- **2026-10-14 · S1-R3 · 字符串构造统一走 fmt** ✅ —— 用户要求“改进所有的字符串格式化和非日志的打印，采用 fmt”。
+  前置核实：`fmt` **12.2.0** 本来就在 `vcpkg.json` 里（`spdlog` 1.17.0 用的就是**外部** fmt —— `spdlog/tweakme.h` 里
+  `SPDLOG_FMT_EXTERNAL` 已定义），所以**只有一份 fmt**，不存在与 spdlog 内置副本打架的问题；
+  vcpkg 的 fmt **没装 C++20 模块**（`share/fmt/` 里无 modules 产物）⇒ `import fmt;` 不可用，
+  正好与既有约定一致（`docs/modules.md`：第三方库不封 module，直接 include 头文件），CMake 侧 `find_package(fmt CONFIG REQUIRED)` + `fmt::fmt`。
+  改动：`head_bytes` 的状态行 / `Trailer:` 预告 / `append_header` / `append_chunk`（十六进制块长）全走 `fmt::format_to(back_inserter(out), …)`
+  （直接往 `out` 上追加，**不产生中间 string**）；`req.version`（原两处 `std::to_string` 拼接）、`Content-Length`（`fmt::to_string`）、
+  `session.cpp` 的 `remote`（`{}:{}`）与 413 消息、`route.cpp` 的 `Allow` 列表（`fmt::join`，顺带把“插 HEAD”挪到摊平之后 —— 输出逐字不变）、
+  `tests/main.cpp` 的响应体构造改用 `fmt::format`、`std::fprintf(stderr, …)` → `fmt::print(stderr, …)`。
+  取舍：`append_chunk` 原本用 `std::to_chars(…, 16)`（标准库最快的整数转字符），换成 `{:x}` 是为了**一处成帧逻辑只写一行**；
+  两者都在纳秒级，相对一次 `async_write` 可忽略 —— 将来若真压出热点，再上 `FMT_COMPILE`（编译期解析格式串）或退回 `to_chars`。
+  验收：构建退出码 0；e2e **29 条一字未改、全过**（用例本身断言的就是格式化后的字节，比如 `user id=42`、`Allow: GET, HEAD`、trailer 名 ——
+  29/29 全过即“格式化结果逐字不变”）。复核：`cmake --build --preset debug_llvm` + `./tests/run.sh`。
+
 - **2026-10-14 · S1-R2 · 响应改成「链式填状态 + flush 出网」** ✅ —— 用户要求“各种 Response 都加 `write(头)` / `write(体)`，
   这才是 handler 驱动的读写”，并给出形态：链式 setter 写状态、`operator co_await` 做 flush、顺序错抛异常。
   我问了三个细节，用户定：**自定义 `error_category`**（不是 `bool`）· **显式 `finish()` + 框架兜底** · **字段私有化只走链式**。

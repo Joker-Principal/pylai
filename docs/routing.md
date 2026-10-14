@@ -26,7 +26,7 @@ struct App
 
 asio::awaitable<void> App::user(Get<"/users/{id}"> req, pylai::http::StringResponse& res)
 {
-	co_await res.body("user id=" + std::to_string(req.param<int, "id">()) + "\n").flush();
+	co_await res.body(fmt::format("user id={}\n", req.param<int, "id">())).flush();
 }
 
 // 长度未知：边跑边推（响应侧 chunked），结束时补 trailer
@@ -48,6 +48,7 @@ auto server = pylai::Server::builder()
 ```
 
 > 📌 消费方要自己 `import asio;` —— handler 的返回类型就是 asio 的 awaitable；实例化 handler 的 TU 还要 `#include <coroutine>`（见 `modules.md`）。
+> 示例里的字符串用 `fmt::format` 拼 —— 第三方库不封 module，消费方自己 `#include <fmt/format.h>`（同一个 vcpkg 包，见 `modules.md`）。
 
 | 元素 | 说明 |
 |---|---|

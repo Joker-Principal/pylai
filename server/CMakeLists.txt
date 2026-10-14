@@ -10,6 +10,7 @@ file(GLOB_RECURSE PYLAI_MODULES CONFIGURE_DEPENDS *.cppm)
 # 框架层自己的依赖（基础依赖在根 CMakeLists 里集中 find_package）。
 find_package(llhttp CONFIG REQUIRED)
 # fmt/spdlog 不做模块封装（按约定：第三方库不封 module），直接 include 头文件。
+find_package(fmt CONFIG REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
 
 # 与 standalone/ 同样的写法：
@@ -26,12 +27,13 @@ target_sources(pylai
         FILES ${PYLAI_MODULES}
 )
 # asio-module / joker::module 被接口单元（乃至 `export import :session`）带到消费方
-# → PUBLIC；llhttp / spdlog 只在实现单元的全局模块片段里出现 → PRIVATE。
+# → PUBLIC；llhttp / fmt / spdlog 只在实现单元的全局模块片段里出现 → PRIVATE。
 target_link_libraries(pylai
     PUBLIC
         asio-module
         joker::module
     PRIVATE
         llhttp::llhttp_static
+        fmt::fmt
         spdlog::spdlog
 )

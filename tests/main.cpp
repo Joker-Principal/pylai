@@ -4,13 +4,15 @@
 #include <exception>
 #include <string>
 
+#include <fmt/format.h>
+
 import asio; // handler 返回 asio::awaitable<void> ⇒ 消费方自己 import asio（框架不 export import 它）
 import pylai;
 
 namespace {
 
 // 声明写法：动词 + 路径住在**第一个形参**（`Get<P>` 既是路由声明、也是请求类型），
-// 响应按**引用**传进来：链式填状态，`co_await res` 才把它发出去（写由 handler 驱动）。
+// 响应按**引用**传进来：链式填状态，链尾的 `flush()` 才把它发出去（写由 handler 驱动）。
 // 注册入口是 `Builder::route_on(&app, &App::...)`，整包一次挂上去。
 using namespace pylai::route;
 
@@ -44,12 +46,12 @@ asio::awaitable<void> App::health(Get<"/health">, pylai::http::StringResponse& r
 
 asio::awaitable<void> App::user(Get<"/users/{id}"> req, pylai::http::StringResponse& res)
 {
-	co_await res.body("user id=" + std::to_string(req.param<int, "id">()) + "\n").flush();
+	co_await res.body(fmt::format("user id={}\n", req.param<int, "id">())).flush();
 }
 
 asio::awaitable<void> App::submit(Post<"/submit/{id}"> req, pylai::http::StringResponse& res)
 {
-	co_await res.body("submitted id=" + std::to_string(req.param<int, "id">()) + "\n").flush();
+	co_await res.body(fmt::format("submitted id={}\n", req.param<int, "id">())).flush();
 }
 
 asio::awaitable<void> App::list_items(Get<"/items">, pylai::http::StringResponse& res)
@@ -116,7 +118,7 @@ int main()
 	}
 	catch(const std::exception& e)
 	{
-		std::fprintf(stderr, "app: fatal: %s\n", e.what());
+		fmt::print(stderr, "app: fatal: {}\n", e.what());
 		return 1;
 	}
 }

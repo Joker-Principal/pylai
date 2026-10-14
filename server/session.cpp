@@ -15,6 +15,7 @@ module;
 #include <variant>
 
 #include <spdlog/spdlog.h>
+#include <fmt/format.h>
 
 module pylai;
 
@@ -34,12 +35,7 @@ asio::awaitable<void> Session::handle(const Settings& settings, const route::Rou
 	std::error_code ec;
 	const auto endpoint = socket.remote_endpoint(ec);
 	std::string remote = "<unknown>";
-	if(!ec)
-	{
-		remote = endpoint.address().to_string();
-		remote += ':';
-		remote += std::to_string(endpoint.port());
-	}
+	if(!ec) remote = fmt::format("{}:{}", endpoint.address().to_string(), endpoint.port());
 
 	Session session(settings, routes, std::move(socket), std::move(remote));
 	log::info("[{}] connected", session.remote);
@@ -235,7 +231,9 @@ asio::awaitable<std::size_t> Session::read_some(std::span<char> out)
 
 			consume(step.consumed);
 			if(body_read + step.delivered > settings.max_body_bytes)
-				throw http::BodyError{413, "request body over " + std::to_string(settings.max_body_bytes) + " bytes"};
+				throw http::BodyError{
+					413, fmt::format("request body over {} bytes", settings.max_body_bytes)
+				};
 
 			body_read += step.delivered;
 			body_finished = step.finished;
