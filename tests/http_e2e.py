@@ -1,4 +1,4 @@
-"""端到端验证：对真 Server 发原始 HTTP 请求，检查位置注入的路由注册是否生效。
+"""端到端验证：对真 Server 发原始 HTTP 请求，检查解析 / 路由 / 应答是否符合预期。
 
 用裸 socket 而不是 curl：curl 会读取环境变量，请求可能不按预期直连。
 用法：./tests/run.sh（一条龙）；或先起 build-dev_llvm/tests/Debug/app，再 python3 tests/http_e2e.py
@@ -45,8 +45,8 @@ def split_body(raw):
 # 断言都带 \r\n 收尾，免得 "Allow: GET, HEAD" 命中 "Allow: GET, HEAD, POST"。
 CASES = [
     ("GET", "/health", b"", 200, "ok", False),
-    ("GET", "/users/42", b"", 200, "user id=42", False),          # Param<int,"id"> 位置注入
-    ("POST", "/submit/7", b"x=1", 200, "submitted id=7", False),  # 同一组树里另一个动词
+    ("GET", "/users/42", b"", 200, "user id=42", False),          # req.param<int,"id">()
+    ("POST", "/submit/7", b"x=1", 200, "submitted id=7", False),  # 同一组树里另一个动词（且不读体 ⇒ 会 Connection: close）
     ("GET", "/items", b"", 200, "items", False),                  # 同路径两个动词：GET 走 GET 那棵
     ("POST", "/items", b"", 200, "created", False),               # 同路径两个动词：POST 走 POST 那棵
     ("GET", "/nope", b"", 404, "404", False),                     # 路径不在
@@ -68,11 +68,13 @@ CASES = [
     ("OPTIONS", "/both", b"", 204, "Allow: GET, HEAD\r\n", True),      # 有显式 HEAD → 不重复补
     ("OPTIONS", "/nope", b"", 404, "404", False),                       # 路径不在 → 404（不是 HEAD，正文照发）
 
-    # 请求体：llhttp 的 on_body（chunked 已解码）→ request.body
+    # 请求体：handler 用 `co_await req.body()` / `read_some()` 自己拉（框架只读到 headers）
     ("POST", "/body", b"hello", 200, "body=hello", False),
     ("POST", "/body", b"", 200, "body=", False),                                  # 空体
     ("POST", "/body", b"chunked-payload", 200, "body=chunked-payload", False, True),  # Transfer-Encoding: chunked
     ("POST", "/body", b"x" * 1025, 413, "413", False),                        # 测试程序把上限设为 1024 → 413
+    # 长度未知（chunked）⇒ 头部阶段判不出来，只能由读体侧计数拦下（走 BodyError 那条路）
+    ("POST", "/body", b"y" * 1025, 413, "413", False, True),
 ]
 
 def check(method, target, body, want_status, want_text, want_empty_body, chunked=False):
@@ -118,7 +120,57 @@ def check_pipeline():
     return ok
 
 
-failed = [check(*case) for case in CASES].count(False) + (0 if check_pipeline() else 1)
+def check_close_header():
+    """请求带 Connection: close ⇒ 响应头里也要写 close。
+
+    现有用例都靠“读到 EOF”隐式验证连接关了，但没人断言这个头（见 http-server-plan.md §4.1.2 D）。
+    """
+    raw = request("GET", "/health")
+    head = raw.partition("\r\n\r\n")[0]
+    ok = "Connection: close" in head
+    print(f"  {'✓' if ok else '✗'} {'close头':7} {'/health':14} -> 响应头{'有' if ok else '没有'} Connection: close")
+    return ok
+
+
+def check_unread_body(method, target, body, want_status, label):
+    """体没读完（handler 不读 / 只读一半）⇒ 响应写 Connection: close，并且连接真的被关。"""
+    sock = socket.create_connection((HOST, PORT), timeout=5)
+    head = f"{method} {target} HTTP/1.1\r\nHost: {HOST}:{PORT}\r\nContent-Length: {len(body)}\r\n\r\n"
+    sock.sendall(head.encode() + body)
+
+    raw = b""
+    closed = False
+    try:
+        while True:
+            chunk = sock.recv(65536)
+            if not chunk:
+                closed = True
+                break
+            raw += chunk
+    except TimeoutError:
+        pass  # 服务器没关连接 ⇒ closed 保持 False
+    sock.close()
+
+    text = raw.decode(errors="replace")
+    head_only = text.partition("\r\n\r\n")[0]
+    status_ok = f"HTTP/1.1 {want_status}" in text
+    ok = status_ok and "Connection: close" in head_only and closed
+    print(
+        f"  {'✓' if ok else '✗'} {label:7} {target:14} -> "
+        f"{text.splitlines()[0] if text else '（无响应）'!r}"
+        f" (期望 {want_status} + Connection: close + 连接关闭；实际 close头="
+        f"{'有' if 'Connection: close' in head_only else '无'}, 连接{'关' if closed else '未关'})"
+    )
+    return ok
+
+
+failed = (
+    [check(*case) for case in CASES].count(False)
+    + (0 if check_pipeline() else 1)
+    + (0 if check_close_header() else 1)
+    + (0 if check_unread_body("POST", "/health", b"ignored-body", 405, "unread") else 1)
+    + (0 if check_unread_body("POST", "/peek", b"0123456789", 200, "halfread") else 1)
+)
 
 print(("FAILED: %d" % failed) if failed else "ALL PASS")
 sys.exit(1 if failed else 0)

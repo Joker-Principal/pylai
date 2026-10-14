@@ -2,7 +2,7 @@
 
 > 写 handler、要指定路由时查这份。
 >
-> - **怎么声明路由** → §1：`Get<"…">` 写在**第一个形参**上（它既是声明、也是请求），handler 返回 `asio::awaitable<void>`，响应按引用填。
+> - **怎么声明路由** → §1：`Get<"…">` 写在**第一个形参**上（它既是声明、也是请求），handler 返回 `asio::awaitable<void>`，响应按引用填，路径参数用 `req.param<>()` 取。
 > - **pattern 的语法与匹配语义** → §2–§6：`Get<>` 尖括号里写的、`Pattern<>` 里写的，是**同一套** pattern。
 > - 所有规则在**编译期**生效：pattern 写错、路由之间冲突，都**编不过**。
 
@@ -42,6 +42,8 @@ auto server = pylai::Server::builder()
 |---|---|
 | **第一个形参** | 必须是 `Get<P>` / `Post<P>` / …：它在编译期给出动词与 path pattern，同时**就是请求**（本次请求的 method / path / headers 在它里面，`req.raw` 是框架解析出的 `http::Request`） |
 | `req.param<T, "名字">()` | 取一个命名捕获。**名字必写**，且在**编译期**对着 pattern 校对；整数走 `from_chars`，`std::string_view` 直通 |
+| `co_await req.body()` | 读完整个体（受 `max_body_bytes` 约束），返回 `std::string`；无体 ⇒ 空串 |
+| `co_await req.read_some(buf)` | 增量读一段（大文件 / SSE）；返回 0 = 体结束 |
 | `pylai::http::Response&` | 框架持有的响应对象，handler 往里填（状态码 / 头 / 体）。**可以不写** —— 不写就发默认的 `200` + 空体 |
 | 返回类型 | 必须是 `asio::awaitable<void>` |
 | `Builder::route_on(&app, &App::m...)` | 一次注册整包；**每个动词一棵**编译期定容的树（不是一棵） |
@@ -50,8 +52,8 @@ auto server = pylai::Server::builder()
 
 > 📌 **“pattern 里的名字没人读”不算错** —— 读取发生在 handler 体内，编译期看不到；这与旧的 `Param<>` 位置注入相比少了一个检查（换来的是错误定位到写的那一行）。
 
-> ⚠️ **读体接口还没落地**：现在经 `req.raw.body` 读（框架先读完整个消息），
-> `req.body()` / `req.read_some()` 是下一刀（见 `http-server-plan.md` §4.1）。
+> ✅ **体由 handler 自己拉**（框架读到 headers 就交棒）：`co_await req.body()` 或 `co_await req.read_some(buf)`。
+> ⚠️ **没读完的体不会被 drain** —— 响应会带上 `Connection: close` 并关连接（所以“忽略体的 POST”会自动变成一次性连接；读了就没事）。
 
 > ⚠️ **已知缺口**：`param<int, …>()` 用 `std::from_chars` 转换，**失败时静默取 0**（`/users/abc` → `id == 0`）。
 > 要回 400 得由 handler 自己判；该语义尚未定案（见 `http-server-plan.md` §11.2 D）。

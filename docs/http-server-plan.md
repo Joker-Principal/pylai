@@ -159,7 +159,7 @@
 > 所以带体请求与 pipeline 共存不需要额外处理（`tests/http_e2e.py` 有这条断言）。
 
 > ⚠️ **本节将被 §4.1 取代一半**：`on_body` / chunked 剥壳 / 上限 / `ParseStatus` 这些**留下来**，
-> 但“框架把整条消息读完再派发”要改成“读到 headers 就交棒”（见 §4.1）。
+> 但“框架把整条消息读完再派发”要改成“读到 headers 就交棒”（见 §4.1）—— ✅ 2026-10-13 已落地。
 
 ---
 
@@ -180,7 +180,7 @@
 > **指标与建模的单位必须建在 "stream / 请求" 层，而不是 "连接" 层**，
 > 否则 H2 / H3 接入时整套统计系统要重写。
 
-### 4.1 请求生命周期：框架读到 headers 就交棒（🟡 2026-10-13 定，待落地）
+### 4.1 请求生命周期：框架读到 headers 就交棒（✅ 2026-10-13 已落地）
 
 **变更**（用户 2026-10-13）：**handler 自己驱动读体**；写响应改为**框架按响应类型发**；框架只负责“读到 headers + 路由 + 收尾”。
 
@@ -239,11 +239,94 @@ asio::awaitable<void> handle(Get<"/health"> req, FileResponse& res);
 > 已验证可沿用：`Parser` 的暂停机制（`http.cpp:170` 把 `HPE_PAUSED` 翻成 `ParseStatus::complete`）——
 > 只需把暂停点从 `on_message_complete` 换到 `on_headers_complete`，并让“继续喂字节”变成 handler 可驱动的入口。
 
-**本层还要决定的**（❓ 尚未展开，可在新会话补）：
+**本层还要决定的** —— ✅ **2026-10-13 已展开为 §4.1.2**：
 
-- 读写缓冲的归属与大小（与 §8 的分配器边界耦合）
-- 超时策略（空闲超时 / 请求超时 / 写超时）——它同时是 §5.5 的准入手段
-- 背压：什么时候停止从 socket 读（H2/H3 有显式流控，H1 只能靠停读）
+- 读写缓冲的归属与大小 → ✅ §4.1.2 G（不新增 per-request 缓冲；大小与 §8 分配器边界留给那一轮）
+- 超时策略（空闲超时 / 请求超时 / 写超时）→ ✅ §4.1.2 F（沿现状两个超时；**不做**请求总时限）
+- 背压：什么时候停止从 socket 读 → ✅ §4.1.2 H（**拉取式天然背压**，不需要额外机制）
+
+#### 4.1.2 交棒：怎么把“读体”交出去（✅ 2026-10-13 已落地；下方标了落地时的两处修订）
+
+**卡点**：`Handler` 已擦除成 `std::function<asio::awaitable<http::Response>(const http::Request&)>`（`route.cppm:24`），
+所以挂在 `http::Request` 上的读体句柄必须是**非模板**的 —— 否则模板会顺着这条擦除边界往上游炸。
+
+**A. reader 接口形态**
+
+| 方案 | 形态 | 结论 |
+|---|---|---|
+| ① **抽象基类** ✅ 已定 | `http::BodyReader`：`virtual awaitable<std::size_t> read_some(std::span<char>) = 0;` + `virtual bool exhausted() const;`；`http::Request` 持 `BodyReader*`（nullptr = 无体）。实现类就是 `Session` 自己。⚠️ **临时方案**：擦除点合并后会被重构掉（用户 2026-10-13） | 每次读一次虚调用，相对一次 `async_read_some` 可忽略 |
+| ② 函数指针表 | `{void* self; awaitable<std::size_t> (*fn)(void*, std::span<char>);}` | 同样的间接层，但要手工绑 `self`，一样省不下 |
+| ③ 交棒前把体读完 | — | 与“先路由再读体”直接矛盾（404/405 不该等体） |
+
+**B. 本轮只做全量读**（§4.1 硬约束 4 已定）：`co_await req.body()` → `std::string`，受 `max_body_bytes` 约束。
+`req.read_some(buf)`（增量，给 SSE / 大文件）**接口先定、实现留后**，免得二次改签名。
+
+**C. 上限与 413 前移**
+
+| 情形 | 处理 | 理由 |
+|---|---|---|
+| `Content-Length` 已声明且 > 上限 | **`on_headers_complete` 阶段就回 413 + close，不进路由** | `content_length` 此时已知（`http.cpp:94`），比“边收边判”更早 |
+| 长度未知（chunked） | reader 计数，超限 ⇒ 错误 ⇒ 框架兜 413 + close | 无法预判 |
+| 任意 413 | **必须关连接**（体没读完、不 drain） | 与“未读体 ⇒ close”同一条规则 |
+
+**D. 未读体 ⇒ `Connection: close`**（✅ 用户 2026-10-13 已定）的落地细节：
+handler 返回后框架看 `reader.exhausted()`；未读完 ⇒ `keep_alive = false` ⇒ 由已有的
+`serialize(response, keep_alive, head_only)` 写出 `Connection: close`（`session.cpp:97`），随后关连接。
+⚠️ 🟡 **风险**：客户端已发出体而服务器直接关闭，部分客户端会报 “connection reset”。
+e2e 要各加一条用例（handler 完全不读 / 读一半）看真实表现，再决定要不要“先 drain 掉已缓冲的那点字节”。
+
+> ⚠️ **验证缺口（已补）**：e2e 靠“读到 EOF”**隐式**钉住“该关的连接关了”（`tests/http_e2e.py:14` 每个请求都带 `Connection: close`），
+> 但此前**没有断言响应头里的 `Connection`**。✅ 落地时补了 3 条用例：`close头`（响应头断言）、`unread`（405 + 未读体）、
+> `halfread`（`POST /peek` 只读 4 字节）——后两条同时断言 `Connection: close` **与**连接真的被关。
+> ✅ 顺带发现：既有用例 `POST /submit/7 b"x=1"`（handler 不读体）现在也走 “close” 这条路 —— 符合预期，未改。
+
+**E. 控制流反转：谁驱动 llhttp**
+
+现状是 `read_request()` 自己循环 `execute → complete → consume + resume`（`session.cpp:103`）。交棒后：
+
+| 步骤 | 谁 | 依据 / 状态 |
+|---|---|---|
+| 停点位 | 从 `on_message_complete`（`http.cpp:130`）**换到 `on_headers_complete`** | ✅ 机制已核：`execute` 把 `HPE_PAUSED` 翻成 `complete`（`http.cpp:170`），`resume()` 已存在（`http.cpp:188`） |
+| keep_alive / path / query | 从 `on_message_complete`（`http.cpp:114-128`）**挪到 `on_headers_complete`** | ✅ 可行（依据见下方注） |
+| 继续喂字节 | handler 侧：先把**已缓冲**的 `buffer[consumed, buffered)` 喂给 `parser.resume()`；不够才 `fill_buffer()` | ✅ 复用 `session.cpp:142` 的空闲超时 ⇒ handler 绕不过超时/取消 |
+| 载荷交付 | `on_body` 把载荷写进**调用者给的缓冲**（不缓存在 Parser 里、不暂停 llhttp） | 🔄 **修订（落地时）**：原设计写的是“交付 + `llhttp_pause`”，实际不要 —— ① 暂停在 `on_body` 里可能“无字节可喂而挂住”；② 未领完的载荷得挂一个指向内部缓冲的 span，而 `consume()` 会 memmove 而失效。<br>✅ 改成：**每次喂给 llhttp 的输入窗口夹到 `out.size()`** ⇒ on_body 拿到的载荷是输入的子区间、必定放得下（`http.cpp:238`） |
+| 进度记账 | ✅ **不需要新机制** | 就用 llhttp 的 `consumed`（= `error_pos - data`）+ 窗口夹取；`Session::consume()` 用法不变（`session.cpp:199`） |
+| 失败怎么表达 | ✅ `http::BodyError{status, message}`：413（chunked 超限）/ 400（体协议错）/ 0（对面断了，无响应可发） | 连接层一个 catch 收口（`session.cpp:110`） |
+
+> ✅ **`should_keep_alive` 的时机已查源码**（llhttp 9.3.1，本机 vcpkg 源）：对**请求**它只看
+> `F_CONNECTION_CLOSE`（HTTP/1.1+）与 `F_CONNECTION_KEEP_ALIVE`（HTTP/1.0）——两者在 headers 解析完时就已定型
+> （`src/http.c:156`；请求的 `message_needs_eof` 恒为 0，`src/http.c:125`）⇒ 挪到 `on_headers_complete` 是安全的。
+> ⚠️ 但 `llhttp__after_message_complete` 会 `parser->flags = 0`（`src/http.c:120`），而用户回调 `on_message_complete`
+> 在它**之前**被调（`src/llhttp.c:1267 → 1238`）⇒ 现状的取值时机正确（我原先怀疑这里藏着 bug，已排除）。
+> 顺带：llhttp 自己对 CONNECT / Upgrade 会直接 pause（`src/llhttp.c:1254`）—— 将来做 WebSocket 升级时可以借用。
+
+> ⚠️ **落地时踩到的坑**：从 `on_headers_complete` 返回 `HPE_USER` 时，`llhttp_execute` 报的是
+> **`HPE_CB_headers_complete`**（不是 `HPE_USER`）⇒ 不能按返回值判“超限”，要按**自己设的标志位**判
+> （`http.cpp:212`）。实测症状：413 用例变成 400。
+
+**F. 超时与取消**（沿现状，不新增机制）
+
+- 读：复用 `fill_buffer()` 的 `idle_timeout`（`session.cpp:142`）；写：`write()` 的 `write_timeout`（`session.cpp:173`）。
+- 取消：连接级信号已接好 —— `server.cpp:128-129`（`plf::hive` 逐个 `emit`）+ `server.cpp:168`（`bind_cancellation_slot`）。
+  🟡 **待复核**：handler 内部的嵌套 `co_await` 是否继承该 slot（“`stop()` 能打断正在读体的 handler”目前没有测试钉住）。
+- ❓ **不做请求总时限**：handler 的业务时间不该被框架掐；慢 handler 占连接的问题交给 Stage 2 的准入控制（§5.5）。
+  ✅ **2026-10-13 用户拍板：不做**。
+
+**G. 缓冲归属** ✅ **不新增 per-request 缓冲** —— 仍以 `Session::buffer`（`std::array<char, 16*1024>`，`session.cppm:38`）为唯一读暂存区；
+`body()` 把载荷 append 进 `std::string`（受上限约束 ⇒ **每请求分配次数可数**，对齐 §1.3 的性能底口径）。更细的分配器边界留给 §8。
+
+**H. 额外收益：背压天然到手** —— 拉取式 ⇒ 框架只在 handler 要字节时才读 socket，不会“读太快把内存塞满”。
+唯一例外是 `body()`（受上限约束）。这条应写进 §4.1 的收益栏。
+
+**I. 落地改动面与验收**（✅ 2026-10-13 完成）
+
+| 项 | 说明 |
+|---|---|
+| `http.cpp` | 停点位搬家、keep_alive/path/query 搬家、`on_body` 改成“写进 reader 缓冲”、上限检查前移；新增 `read_body()` |
+| `http.cppm` | 去掉 `Request::body`；加 `BodyReader` / `BodyError` + `Request::body()` / `read_some()` / `has_body()` |
+| `session.cpp(m)` | `read_request()` → `read_headers()` + 新增 `finish_message()`；`Session` 自己实现 `http::BodyReader` |
+| `tests/main.cpp` | `echo_body` 改成 `co_await req.body()`；新增 `/peek` 路由（只读 4 字节） |
+| 验收 | ✅ **e2e 既有 22 条一条未改、全过**；新增 4 条（`close头` / `unread` / `halfread` / chunked 超限）→ **26/26**；`cmake --build --preset debug_llvm` 退出码 0 |
 
 ---
 
@@ -450,7 +533,7 @@ $\sigma$ = 争用项，$\kappa$ = 一致性项（**拐点后吞吐反而下降**
 | 阶段 | 内容 | 验证 |
 |---|---|---|
 | **0** | **协议基线**：单 io_context + io_uring，固定线程数，keep-alive，超时（空闲 / 写）。**无指标、无自适应、无 TLS**。<br>🟡 **进行中**<br>✅ 已跑通：llhttp 解析（pipeline / 半包 / 400 / 431）、keep-alive、空闲与写超时、**取消传播**（每连接独立 `cancellation_signal` + `plf::hive` 注册表，见 `asio-notes.md` §7）、SIGINT 优雅停机、io_uring 后端（实测 `anon_inode:[io_uring]`）、**声明式路由**（`route_on` + 编译期冲突检查 + 每 method 一棵树，见 §11.2 C）、**协议层应答**（405/OPTIONS 的 `Allow`、HEAD 复用 GET，见 §11.2 G）、**请求体**（llhttp `on_body` + 上限 → 413，见 §3.1）<br>⚠️ 其中**声明式路由 / 协议层应答 / 请求体**三项会被 Stage 1 **重新打开**（形态变更） | 能稳定服务（外部基线见 Stage 2） |
-| **1** | **框架形态定形**：交棒（handler 读体，§4.1）· 响应类型多种（§4.1.1）· 擦除点合并（§11.2 C）· **留出观测点 / 可调参数 / 指纹挂点**（§1.1）· `routing.md` 重写 | e2e 全绿；接口能承担 clio；文档与实现一致 |
+| **1** | **框架形态定形**：~~交棒~~（✅ 已落地，§4.1.2）· 响应类型多种（§4.1.1）· 擦除点合并（§11.2 C）· **留出观测点 / 可调参数 / 指纹挂点**（§1.1）· `routing.md` 重写（✅） | e2e 全绿；接口能承担 clio；文档与实现一致 |
 | → **MU** | 🎯 **最小可用 = Stage 1 完成即达**。只服务 clio（本地、无 TLS、小请求） | C++ 模块可被 `import` 消费；拿去 clio 试用 |
 | **2** | **有界资源与稳定性验收**：有界队列 / 在途上限 / 准入控制（固定值即可）+ **外部压测 60s 基线** | 60s 无泄漏无挂死，记录基线 |
 | **3** | **只测不调**：按 §4 的结论建在 "stream/请求" 层的指标；请求级直方图 + 计数器 + OS 侧；周期报告；**观测开销自测**；冻结模式 | 指标稳定；开销 < 1~2% |
@@ -648,7 +731,7 @@ auto server = pylai::Server::builder()
 > - **协程返回类型**：~~`Endpoint` 能当协程返回类型靠 `route.cppm` 尾部的 `coroutine_traits` 特化~~
 >   🔄 **2026-10-13 晚已删** —— 声明搬到第一个形参后，handler 返回 `awaitable<void>` 是**天然**的，
 >   无需借 asio 的 frame 当返回值 ⇒ `coroutine_traits` 特化与 `release()` 一并删除（手写协程正文也是那个理由不再需要）。
-> - **端到端已验证** ✅：`tests/http_e2e.py`（裸 socket，避开 curl 的环境变量）22 条用例全过 ——
+> - **端到端已验证** ✅：`tests/http_e2e.py`（裸 socket，避开 curl 的环境变量）**26 条**用例全过 ——
 >   `/users/42 → user id=42`（`req.param<>()` 生效）· `GET /items` 与 `POST /items`（**同路径两动词各走各的**）·
 >   `POST /health → 405` + `Allow` · `/nope` → 404 · 请求体（含 chunked）与 413。复核：`cmake --build --preset debug_llvm` → `./tests/run.sh`。
 > - **已知缺口** 🔍：`/users/abc → user id=0`（`from_chars` 失败静默给 0 → 需要 400 路径）；

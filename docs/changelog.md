@@ -5,6 +5,16 @@
 
 ## 2026-10-13
 
+- **Stage 1 第二刀：交棒（handler 自己读体）** ✅ —— 先出设计（`http-server-plan.md` §4.1.2，含落地时的两处修订）再落地。
+  框架只解析到 `on_headers_complete` 就交棒：新增 `http::BodyReader`（抽象基类，`Session` 自己实现；擦除点合并后会重构掉）+
+  `Request::body()` / `read_some()` / `has_body()`；**删掉 `Request::body` 这个数据成员**（框架不再读完体，留着就是谎）。
+  413 有两条路：`Content-Length` 在头部阶段预检（不进路由），长度未知（chunked）由读体侧计数拦（`BodyError{413}`）；
+  未读体 ⇒ 响应写 `Connection: close` 并关连接；**不做**请求总时限（用户拍板）。
+  实现要点：每次喂给 llhttp 的输入窗口**夹到调用者缓冲大小** ⇒ `on_body` 拿到的载荷必定放得下（不必在回调里 pause、不必挂 span）；
+  进度记账不需要新机制（就用 llhttp 的 `consumed`）；读体复用 `fill_buffer` 的超时 ⇒ 绕不过超时与取消；**拉取式天然背压**。
+  ⚠️ 踩坑：`on_headers_complete` 返回 `HPE_USER` 时 llhttp 报的是 `HPE_CB_headers_complete` ⇒ 超限判定要按自己设的标志位（症状：413 变 400）。
+  验收：既有 e2e **22 条一字未改、全过** + 新增 4 条（`close头` / `unread` / `halfread` / chunked 超限）⇒ **26/26**；构建退出码 0。
+
 - **`Param<>` 变成 `Request` 的成员函数；静态用例搬出模块** ✅ —— 两件事同一动机：声明搬到第一个形参后，
   请求对象本身就带捕获（`Request` 新增 `std::span<const Capture> captures`），路径参数不必再占一个形参位。
   `req.param<T, "名字">()`：名字**必写**，`slot_of("名字")` 在编译期算出下标（`static_assert` 拦错，`from_chars` 语义与旧的相同）；

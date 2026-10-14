@@ -1,3 +1,4 @@
+#include <array>
 #include <coroutine>
 #include <cstdio>
 #include <exception>
@@ -27,8 +28,10 @@ struct App
 	asio::awaitable<void> both(Get<"/both"> req, pylai::http::Response& res);
 	asio::awaitable<void> both_head(Head<"/both"> req, pylai::http::Response& res);
 
-	// 请求体：llhttp 的 on_body 把体（chunked 已解码）填进 `req.raw.body`，handler 直接读。
+	// 请求体：框架读到 headers 就交棒，体由 handler 自己拉（`co_await req.body()`）。
 	asio::awaitable<void> echo_body(Post<"/body"> req, pylai::http::Response& res);
+	// 只读一部分体就返回：e2e 用它验“未读体 ⇒ Connection: close”。
+	asio::awaitable<void> peek_body(Post<"/peek"> req, pylai::http::Response& res);
 };
 
 asio::awaitable<void> App::health(Get<"/health">, pylai::http::Response& res)
@@ -73,9 +76,20 @@ asio::awaitable<void> App::both_head(Head<"/both">, pylai::http::Response& res)
 	co_return;
 }
 
+// 请求体：框架读到 headers 就交棒，体由 handler 自己拉（`co_await req.body()`，受 max_body_bytes 约束）。
 asio::awaitable<void> App::echo_body(Post<"/body"> req, pylai::http::Response& res)
 {
-	res.body = "body=" + req.raw.body;
+	const std::string body = co_await req.body();
+	res.body = "body=" + body;
+	co_return;
+}
+
+// 只读一小段体就返回 —— e2e 用它验“未读体 ⇒ Connection: close”。
+asio::awaitable<void> App::peek_body(Post<"/peek"> req, pylai::http::Response& res)
+{
+	std::array<char, 4> head{};
+	const std::size_t n = co_await req.read_some(head);
+	res.body = "peek=" + std::string{head.data(), n};
 	co_return;
 }
 
@@ -90,7 +104,7 @@ int main()
 		                  .bind("127.0.0.1", 18080)
 			                  .max_body_bytes(1024) // 让 e2e 用 1 KiB 就能试到 413
 			                  .route_on(&app, &App::health, &App::user, &App::submit, &App::list_items,
-			                            &App::create_item, &App::both, &App::both_head, &App::echo_body)
+			                            &App::create_item, &App::both, &App::both_head, &App::echo_body, &App::peek_body)
 		                  .build();
 		return server.run();
 	}

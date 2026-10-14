@@ -1,6 +1,12 @@
 module;
 
+#include <algorithm>
+#include <array>
+#include <coroutine>
+#include <cstring>
 #include <memory>
+#include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -50,11 +56,23 @@ struct Parser::Impl
 	std::string pending_value;
 	std::string reason;
 
+	// 体阶段的交付去处（由 read_body 每次设好；载荷不缓存在这里）。
+	std::span<char> sink{};
+	std::size_t delivered{0};
+
+	bool paused_on_headers{false};
+	bool paused_on_message{false};
+	bool over_limit{false};
+	bool finished{false};
+
 	static Impl* self(llhttp_t* parser) noexcept { return static_cast<Impl*>(parser->data); }
 
 	static int on_message_begin(llhttp_t* parser)
 	{
-		self(parser)->request = Request{};
+		auto* owner = self(parser);
+		owner->request = Request{};
+		owner->finished = false;
+		owner->over_limit = false;
 		return 0;
 	}
 
@@ -85,49 +103,68 @@ struct Parser::Impl
 		return 0;
 	}
 
+	// 头部阶段在这里停：**keep_alive 与 path/query 都搬到这里算**（依据见 docs/http-server-plan.md §4.1.2 E）。
 	static int on_headers_complete(llhttp_t* parser)
 	{
 		auto* owner = self(parser);
-		owner->request.method = llhttp_method_name(static_cast<llhttp_method_t>(parser->method));
-		owner->request.version =
+		auto& req = owner->request;
+
+		req.method = llhttp_method_name(static_cast<llhttp_method_t>(parser->method));
+		req.version =
 			std::string{"HTTP/"} + std::to_string(parser->http_major) + "." + std::to_string(parser->http_minor);
-		owner->request.content_length = parser->content_length;
-		owner->request.has_content_length = (parser->flags & F_CONTENT_LENGTH) != 0;
-		owner->request.chunked = (parser->flags & F_CHUNKED) != 0;
-		return 0;
+		req.content_length = parser->content_length;
+		req.has_content_length = (parser->flags & F_CONTENT_LENGTH) != 0;
+		req.chunked = (parser->flags & F_CHUNKED) != 0;
+
+		// keep-alive：对请求而言它只看 Connection 头与版本，两者此时都已定型。
+		req.keep_alive = llhttp_should_keep_alive(parser) != 0;
+
+		// target 到这时已完整（on_url 可能被分多次调用）。
+		const auto& target = req.target;
+		const auto separator = target.find('?');
+		if(separator == std::string::npos)
+		{
+			req.path = target;
+		}
+		else
+		{
+			req.path = target.substr(0, separator);
+			req.query = target.substr(separator + 1);
+			req.has_query = true;
+		}
+
+		// 声明的长度直接超上限 ⇒ 不进路由（比“边收边判”更早）。
+		if(req.has_content_length && req.content_length > owner->max_body_bytes)
+		{
+			owner->over_limit = true;
+			return HPE_USER;
+		}
+
+		owner->paused_on_headers = true;
+		return HPE_PAUSED; // 把控制权交回 execute()，框架在此交棒
 	}
 
-	// chunked 的块边界由 llhttp 剥掉，这里拿到的是**载荷**。
+	// chunked 的块边界由 llhttp 剥掉，这里拿到的是**载荷** —— 直接写进 reader 给的缓冲。
 	static int on_body(llhttp_t* parser, const char* at, std::size_t length)
 	{
 		auto* owner = self(parser);
-		if(owner->request.body.size() + length > owner->max_body_bytes) return HPE_USER; // 中止解析，交给 Session 回 413
+		if(length > owner->sink.size() - owner->delivered) // 窗口已夹到 sink 大小，理论上不会发生
+		{
+			owner->reason = "internal: body chunk larger than the reader buffer";
+			return HPE_USER;
+		}
 
-		owner->request.body.append(at, length);
+		std::memcpy(owner->sink.data() + owner->delivered, at, length);
+		owner->delivered += length;
 		return 0;
 	}
 
 	static int on_message_complete(llhttp_t* parser)
 	{
 		auto* owner = self(parser);
-		// keep-alive 的判定要等整个消息走完才可靠（Connection 头 + 版本 + 定界方式）。
-		owner->request.keep_alive = llhttp_should_keep_alive(parser) != 0;
-
-		// target 到这时才完整（on_url 可能被分多次调用）。
-		const auto& target = owner->request.target;
-		const auto separator = target.find('?');
-		if(separator == std::string::npos)
-		{
-			owner->request.path = target;
-		}
-		else
-		{
-			owner->request.path = target.substr(0, separator);
-			owner->request.query = target.substr(separator + 1);
-			owner->request.has_query = true;
-		}
-
-		return HPE_PAUSED; // 停下来，把控制权交回 execute() 的调用方
+		owner->finished = true;
+		owner->paused_on_message = true;
+		return HPE_PAUSED; // 停在下一个请求之前
 	}
 
 	static const llhttp_settings_t& settings()
@@ -162,34 +199,99 @@ Parser& Parser::operator=(Parser&&) noexcept = default;
 
 ParseStatus Parser::execute(const char* data, std::size_t length, std::size_t& consumed)
 {
+	impl->paused_on_headers = false;
+	impl->paused_on_message = false;
+	impl->sink = {};
+	impl->delivered = 0;
+
 	consumed = 0;
 	const llhttp_errno_t err = llhttp_execute(&impl->handle, data, length);
 
 	if(err == HPE_OK) return ParseStatus::incomplete; // 输入耗尽，但消息还没完
 
-	if(err == HPE_PAUSED)
+	if(impl->over_limit)
 	{
-		// PAUSED 时 error_pos 指向消息结束后的位置（实测），相减即本请求字节数。
-		const char* position = llhttp_get_error_pos(&impl->handle);
-		consumed = position != nullptr ? static_cast<std::size_t>(position - data) : length;
-		return ParseStatus::complete;
-	}
-
-	if(err == HPE_USER) // 本文件里只有 on_body 会主动报错（体超上限）
-	{
+		// 头部阶段就发现声明的长度超限：on_headers_complete 主动中断了。
+		// ⚠️ 这时 llhttp 报的是 `HPE_CB_headers_complete`（不是 HPE_USER），所以按标志位判。
 		impl->reason = "request body exceeds the configured limit";
 		return ParseStatus::too_large;
+	}
+
+	if(err == HPE_PAUSED)
+	{
+		// PAUSED 时 error_pos 指向停下的位置（实测），相减即本次消费掉的字节数。
+		const char* position = llhttp_get_error_pos(&impl->handle);
+		consumed = position != nullptr ? static_cast<std::size_t>(position - data) : length;
+		return impl->paused_on_message ? ParseStatus::message_complete : ParseStatus::headers_complete;
 	}
 
 	impl->reason = llhttp_get_error_reason(&impl->handle);
 	return ParseStatus::error;
 }
 
+Parser::BodyStep Parser::read_body(const char* data, std::size_t length, std::span<char> out)
+{
+	BodyStep step;
+	impl->sink = out;
+	impl->delivered = 0;
+	impl->paused_on_headers = false;
+	impl->paused_on_message = false;
+
+	// 夹到 out.size()：llhttp 交给 on_body 的载荷是输入的子区间 ⇒ 保证它一定放得下。
+	const std::size_t window = std::min(length, out.size());
+	const llhttp_errno_t err = llhttp_execute(&impl->handle, data, window);
+	step.delivered = impl->delivered;
+	impl->sink = {};
+
+	if(err == HPE_OK)
+	{
+		step.consumed = window;
+		return step;
+	}
+
+	if(err == HPE_PAUSED)
+	{
+		// 体阶段只会在 message_complete 处停（下一个请求的头部不会再进到本次调用里）。
+		const char* position = llhttp_get_error_pos(&impl->handle);
+		step.consumed = position != nullptr ? static_cast<std::size_t>(position - data) : window;
+		step.finished = impl->paused_on_message;
+		return step;
+	}
+
+	step.failed = true;
+	impl->reason = (err == HPE_USER) ? impl->reason : std::string{llhttp_get_error_reason(&impl->handle)};
+	return step;
+}
+
 void Parser::resume() { llhttp_resume(&impl->handle); }
 
 const Request& Parser::current() const { return impl->request; }
+Request& Parser::current() { return impl->request; }
 
 std::string_view Parser::error_reason() const { return impl->reason; }
+
+asio::awaitable<std::string> Request::body() const
+{
+	std::string out;
+	if(body_reader == nullptr) co_return out;
+	if(has_content_length) out.reserve(static_cast<std::size_t>(content_length));
+
+	std::array<char, 8 * 1024> chunk{};
+	for(;;)
+	{
+		const std::size_t n = co_await body_reader->read_some(chunk);
+		if(n == 0) break;
+		out.append(chunk.data(), n);
+	}
+
+	co_return out;
+}
+
+asio::awaitable<std::size_t> Request::read_some(std::span<char> out) const
+{
+	if(body_reader == nullptr) co_return 0;
+	co_return co_await body_reader->read_some(out);
+}
 
 std::string serialize(const Response& response, bool keep_alive, bool head_only)
 {

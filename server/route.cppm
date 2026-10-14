@@ -770,8 +770,12 @@ struct Request
 		return names.size();
 	}
 
-	const http::Request& raw; // 框架解析出来的 start line + headers（+ 体；交棒落地后改由 handler 按需读）
+	const http::Request& raw; // 框架解析出来的 start line + headers
 	std::span<const Capture> captures; // 本次匹配出的命名捕获，生存期覆盖 handler 执行期间
+
+	// 读本请求的体 —— 接口挂在请求本身上（框架读到 headers 就交棒，见 http-server-plan.md §4.1）。
+	[[nodiscard]] asio::awaitable<std::string> body() const { co_return co_await raw.body(); }
+	asio::awaitable<std::size_t> read_some(std::span<char> out) const { co_return co_await raw.read_some(out); }
 
 	// 按名字取命名捕获 —— 名字在**编译期**对着 pattern 校对（写错就编不过）。
 	// 整数走 `from_chars`（与旧的位置注入同语义：转换失败静默给 0）；string_view 直通。

@@ -30,11 +30,13 @@ Circular dependency detected in the C++ module import graph
 :config ← :http ← :route ← :session ← :server
 ```
 
-✅ **2026-10-13 新增一条外部边**：`:route` 现在 `import jk;`（用 jk 的 `Callable` 做 `pmf` 类型萃取）。
-jk 是 `FetchContent` 拉的独立模块（target `joker::module`），不参与分区环，所以不影响上面的 DAG。
+✅ **2026-10-13 新增的两条外部边**：`:route` 现在 `import jk;`（用 jk 的 `Callable` 做 `pmf` 类型萃取）；
+`:http` 现在 `import asio;`（交棒后 `Request` 的读体接口是协程，见 `http-server-plan.md` §4.1.2）。
+两者都是 `FetchContent` 拉的独立模块（target `joker::module` / `asio-module`），不参与分区环，所以不影响上面的 DAG。
 
 ```
 jk  ──→  :route
+asio ─→  :http
 ```
 
 `Settings` 放在 `:config` 这个**叶子分区**，是为了让 `:session` 与 `:server`

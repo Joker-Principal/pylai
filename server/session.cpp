@@ -5,6 +5,8 @@ module;
 #include <cstddef>
 #include <cstring>
 #include <exception>
+#include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -88,19 +90,53 @@ asio::awaitable<void> Session::run()
 {
 	for(std::size_t served = 0;; ++served)
 	{
-		if(!co_await read_request()) co_return;
+		if(!co_await read_headers()) co_return;
 
-		const auto& req = parser.current();
-		const bool keep_alive = req.keep_alive && (served + 1) < settings.max_requests_per_connection;
+		auto& req = parser.current();
+		req.body_reader = this; // 交棒：handler 通过 req.body() / read_some() 回来拉字节
+		body_read = 0;
+		body_finished = !req.has_body();
 
-		auto response = co_await routes.dispatch(req);
+		const bool want_keep_alive = req.keep_alive && (served + 1) < settings.max_requests_per_connection;
+
+		http::Response response;
+		bool body_failed = false;
+		int body_status = 0;
+
+		try
+		{
+			response = co_await routes.dispatch(req); // handler 在这里自己决定读不读体
+		}
+		catch(const http::BodyError& e)
+		{
+			body_failed = true;
+			body_status = e.status();
+			log::warn("[{}] {}", remote, e.what());
+		}
+
+		req.body_reader = nullptr;
+
+		if(body_failed)
+		{
+			if(body_status != 0) co_await write(http::serialize(error_response(body_status), false, false));
+			co_return;
+		}
+
+		// 体没读完（handler 没读 / 只读了一半）⇒ 不替客户端 drain，直接收工：
+		// 响应里写 Connection: close，然后关连接（docs/http-server-plan.md §4.1）。
+		const bool unread = !body_finished;
+		if(unread) log::info("[{}] request body left unread; closing", remote);
+
+		const bool keep_alive = want_keep_alive && !unread;
 		if(!co_await write(http::serialize(response, keep_alive, req.method == "HEAD"))) co_return;
-
 		if(!keep_alive) co_return;
+
+		if(!co_await finish_message()) co_return;
 	}
 }
 
-asio::awaitable<bool> Session::read_request()
+// 解析到"头部完成"（交棒点）。返回后 parser 已 resume，handler 可以拉体。
+asio::awaitable<bool> Session::read_headers()
 {
 	for(;;)
 	{
@@ -111,9 +147,13 @@ asio::awaitable<bool> Session::read_request()
 
 			switch(status)
 			{
-			case http::ParseStatus::complete:
+			case http::ParseStatus::headers_complete:
 				consume(consumed);
 				parser.resume();
+				co_return true;
+			case http::ParseStatus::message_complete: // 无体请求可能一路走完（防御）
+				consume(consumed);
+				message_done = true;
 				co_return true;
 			case http::ParseStatus::too_large:
 				log::warn("[{}] request body over {} bytes", remote, settings.max_body_bytes);
@@ -136,6 +176,76 @@ asio::awaitable<bool> Session::read_request()
 		}
 
 		if(!co_await fill_buffer()) co_return false;
+	}
+}
+
+// 让 llhttp 把当前消息走完（读完体的请求已停在 message_complete；无体请求还没走过）。
+// 返回前 resume，下一个请求可以从头解析。
+asio::awaitable<bool> Session::finish_message()
+{
+	while(!message_done)
+	{
+		std::size_t consumed = 0;
+		const auto status = parser.execute(buffer.data(), buffered, consumed);
+		if(consumed > 0) consume(consumed);
+
+		switch(status)
+		{
+		case http::ParseStatus::message_complete:
+			message_done = true;
+			break;
+		case http::ParseStatus::error:
+		case http::ParseStatus::too_large:
+			log::warn("[{}] bad request: {}", remote, parser.error_reason());
+			co_return false;
+		case http::ParseStatus::headers_complete:
+			log::warn("[{}] unexpected parse state while finishing the message", remote);
+			co_return false;
+		default:
+			if(buffered == buffer.size()) co_return false;
+			if(!co_await fill_buffer()) co_return false;
+			break;
+		}
+	}
+
+	parser.resume();
+	message_done = false;
+	co_return true;
+}
+
+// http::BodyReader 的实现：把 llhttp 的体载荷拉出来交给 handler。
+// 每次最多交付 out.size() 字节 —— 这同时把"每次喂给 llhttp 的输入窗口"限死了，
+// 于是 on_body 拿到的载荷一定放得下（见 docs/http-server-plan.md §4.1.2 E）。
+asio::awaitable<std::size_t> Session::read_some(std::span<char> out)
+{
+	if(out.empty()) throw std::invalid_argument{"Session::read_some: empty buffer"};
+
+	for(;;)
+	{
+		if(body_finished) co_return 0;
+
+		if(buffered > 0)
+		{
+			const auto step = parser.read_body(buffer.data(), buffered, out);
+
+			if(step.failed) throw http::BodyError{400, std::string{parser.error_reason()}};
+
+			consume(step.consumed);
+			if(body_read + step.delivered > settings.max_body_bytes)
+				throw http::BodyError{413, "request body over " + std::to_string(settings.max_body_bytes) + " bytes"};
+
+			body_read += step.delivered;
+			body_finished = step.finished;
+			message_done = step.finished;
+
+			if(step.delivered > 0 || body_finished) co_return step.delivered;
+			continue; // 窗口里全是 chunk 头 ⇒ 再拉一次
+		}
+
+		if(buffered == buffer.size()) throw http::BodyError{400, "request body stalled"};
+
+		// 对面断了或空闲超时 ⇒ 体读不完了（此刻无法再应答，交给连接层收工）
+		if(!co_await fill_buffer()) throw http::BodyError{0, "connection ended before the request body was complete"};
 	}
 }
 
