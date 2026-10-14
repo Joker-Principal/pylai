@@ -24,10 +24,6 @@ import :session;
 
 namespace pylai {
 
-namespace {
-constexpr int max_consecutive_accept_errors = 5;
-}
-
 Server::Builder& Server::Builder::bind(std::string address, std::uint16_t port)
 {
 	settings.bind_address = std::move(address);
@@ -131,13 +127,10 @@ void Server::quit()
 
 asio::awaitable<void> Server::accept_loop()
 {
-	auto& ioc = context;
-	const auto& cfg = settings;
-
-	asio::ip::tcp::acceptor acceptor(ioc, {asio::ip::make_address(cfg.bind_address), cfg.port});
+	asio::ip::tcp::acceptor acceptor(context, {asio::ip::make_address(settings.bind_address), settings.port});
 
 	const auto local = acceptor.local_endpoint();
-	log::info("listening on {}:{} (io threads: {})", local.address().to_string(), local.port(), cfg.io_threads);
+	log::info("listening on {}:{} (io threads: {})", local.address().to_string(), local.port(), settings.io_threads);
 
 	int consecutive_errors = 0;
 	for(;;)
@@ -146,14 +139,16 @@ asio::awaitable<void> Server::accept_loop()
 			asio::bind_cancellation_slot(accept_signal.slot(), asio::as_tuple(asio::use_awaitable))
 		);
 
-		if(ec == asio::error::operation_aborted)
+		if(ec == asio::error::operation_aborted) [[unlikely]]
 		{
 			log::info("accept cancelled, shutting down");
 			co_return;
 		}
-		if(ec)
+		if(ec) [[unlikely]]
 		{
 			log::err("accept error: {}", ec.message());
+
+			constexpr int max_consecutive_accept_errors = 5;
 			if(++consecutive_errors >= max_consecutive_accept_errors)
 			{
 				log::err("too many consecutive accept errors");
@@ -164,11 +159,11 @@ asio::awaitable<void> Server::accept_loop()
 		}
 		consecutive_errors = 0;
 
-		const auto handle = sessions.emplace();
+		const auto session_signal = sessions.emplace();
 
 		asio::co_spawn(
-			ioc, Session::handle(settings, routes, std::move(socket)),
-			asio::bind_cancellation_slot(handle->slot(), [this, handle](std::exception_ptr ep) {
+			context, Session::handle(settings, routes, std::move(socket)),
+			asio::bind_cancellation_slot(session_signal->slot(), [this, session_signal](std::exception_ptr ep) {
 				if(ep)
 				{
 					try
@@ -186,7 +181,7 @@ asio::awaitable<void> Server::accept_loop()
 				}
 
 				// 延后一拍：本回调可能正由该 signal 的取消路径调用，handler 尚未退栈。
-				asio::post(context, [this, handle] { sessions.erase(handle); });
+				asio::post(context, [this, session_signal] { sessions.erase(session_signal); });
 			})
 		);
 	}

@@ -84,14 +84,13 @@ public:
 
 private:
 	Server(Settings settings, route::Router routes);
+	asio::awaitable<void> accept_loop();
 
+private:
 	asio::io_context context;
 	Settings settings;
 	route::Router routes;
-
 	asio::cancellation_signal accept_signal;
 	plf::hive<asio::cancellation_signal> sessions;
-
-	asio::awaitable<void> accept_loop();
 };
 } // namespace pylai

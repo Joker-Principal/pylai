@@ -12,7 +12,6 @@ export module pylai:log;
 
 export namespace pylai::log {
 
-	// 格式串必须是编译期常量；调用位置由默认参数捕获。
 template<typename... Args>
 struct FormatStr
 {
