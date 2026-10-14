@@ -67,13 +67,15 @@ Router::~Router() = default;
 
 void Router::set_routes(std::vector<VerbRoutes> routes) { methods = std::move(routes); }
 
-asio::awaitable<void> Router::dispatch(const http::Request& request, http::ResponseWriter& writer) const
+asio::awaitable<void> Router::dispatch(
+	const http::Request& request, http::BodyReader& in, http::ResponseWriter& writer
+) const
 {
 	// 快路径：只试请求动词那个单元（匹配与调用在同一处，命中后捕获直接交给 handler）。
 	for(const VerbRoutes& route : methods)
 	{
 		if(route.verb != request.method) continue;
-		if(co_await route.invoke(request, writer)) co_return;
+		if(co_await route.invoke(request, in, writer)) co_return;
 	}
 
 	// 没写 `Head<>` 时，HEAD 落到同路径的 GET 上（正文由响应类型按 HEAD 抑制）。
@@ -82,7 +84,7 @@ asio::awaitable<void> Router::dispatch(const http::Request& request, http::Respo
 		for(const VerbRoutes& route : methods)
 		{
 			if(route.verb != "GET") continue;
-			if(co_await route.invoke(request, writer)) co_return;
+			if(co_await route.invoke(request, in, writer)) co_return;
 		}
 	}
 

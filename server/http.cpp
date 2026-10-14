@@ -279,27 +279,20 @@ Request& Parser::current() { return impl->request; }
 
 std::string_view Parser::error_reason() const { return impl->reason; }
 
-asio::awaitable<std::vector<std::byte>> Request::body() const
+asio::awaitable<std::vector<std::byte>> read_body(BodyReader& in, std::uint64_t reserve_hint)
 {
 	std::vector<std::byte> out;
-	if(body_reader == nullptr) co_return out;
-	if(has_content_length) out.reserve(static_cast<std::size_t>(content_length));
+	if(reserve_hint > 0) out.reserve(static_cast<std::size_t>(reserve_hint));
 
 	std::array<std::byte, 8 * 1024> chunk{};
 	for(;;)
 	{
-		const std::size_t n = co_await body_reader->read_some(chunk);
+		const std::size_t n = co_await in.read_some(chunk);
 		if(n == 0) break;
 		out.insert(out.end(), chunk.data(), chunk.data() + n);
 	}
 
 	co_return out;
-}
-
-asio::awaitable<std::size_t> Request::read_some(std::span<std::byte> out) const
-{
-	if(body_reader == nullptr) co_return 0;
-	co_return co_await body_reader->read_some(out);
 }
 
 namespace {

@@ -114,8 +114,13 @@ public:
 	}
 };
 
-// 一个请求的语义视图：start line + headers。
-// ⚠️ **体不在里面** —— 体由 handler 自己拉（`body()` / `read_some()`）。
+// 把读通道拉干：反复 `read_some` 直到 0（上限 / 超时由通道实现自己管）。
+// `reserve_hint` 只影响预留（有 `Content-Length` 时传它，少几次扩容）。
+[[nodiscard]] asio::awaitable<std::vector<std::byte>> read_body(BodyReader& in, std::uint64_t reserve_hint = 0);
+
+// 一个请求的报文数据：start line + headers。**纯数据** —— 不带宽读能力。
+// ⚠️ 体也不在里面：体由 handler 走**读通道**（`BodyReader`）自己拉；
+//    "用哪个通道"由 `route::Request`（视图）持有，报文容器不必知道。
 struct Request
 {
 	std::string method;	 // 例 "GET"
@@ -126,9 +131,6 @@ struct Request
 
 	std::vector<Header> headers;
 
-	// 读体句柄：框架在交棒前填（无体请求也会填，实现自己知道已到尾）。
-	BodyReader* body_reader{nullptr};
-
 	std::uint64_t content_length{0};
 	bool has_content_length{false};
 	bool has_query{false};
@@ -137,23 +139,6 @@ struct Request
 
 	// 这个请求有没有体（框架用来决定要不要让 llhttp 继续走完消息）。
 	[[nodiscard]] bool has_body() const noexcept { return chunked || content_length > 0; }
-
-	// 转发读通道（让 `asio::async_read(req, …)` 之类的组合操作直接吃 `Request`）。
-	using executor_type = asio::any_io_executor; // asio 的流概念要求这个成员类型
-	[[nodiscard]] executor_type get_executor() const noexcept
-	{
-		return body_reader != nullptr ? body_reader->get_executor() : asio::any_io_executor{};
-	}
-	template <typename MutableBufferSequence, typename CompletionToken>
-	auto async_read_some(const MutableBufferSequence& buffers, CompletionToken&& token) const
-	{
-		return body_reader->async_read_some(buffers, std::forward<CompletionToken>(token));
-	}
-
-	// 读完整个体（受 `max_body_bytes` 约束）；无体 ⇒ 空。
-	[[nodiscard]] asio::awaitable<std::vector<std::byte>> body() const;
-	// 增量读一段（大文件 / SSE 用）；返回 0 = 体结束。
-	asio::awaitable<std::size_t> read_some(std::span<std::byte> out) const;
 };
 
 // 写响应时可能出的错（`std::error_code` + 自定义 category；空 error_code = 成功）。
@@ -457,7 +442,7 @@ public:
 	void resume();
 
 	const Request& current() const;
-	Request& current(); // 交棒前，框架要往里填 body_reader
+	Request& current(); // 当前这条请求的报文数据（解析完 start line + headers 后有效）
 
 	// 仅在 execute() 返回 error 时有意义。
 	std::string_view error_reason() const;

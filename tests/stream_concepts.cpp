@@ -20,8 +20,8 @@ namespace {
 	co_await asio::async_read(reader, asio::buffer(buffer), asio::use_awaitable);
 }
 
-// 读侧：`http::Request` 转发同一套接口 ⇒ `asio::async_read(req, …)` 能直接吃它
-[[maybe_unused]] asio::awaitable<void> probe_request_stream(pylai::http::Request& request)
+// 读侧：`route::Request`（handler 拿到的视图）持着同一个接口 ⇒ `asio::async_read(req, …)` 能直接吃它
+[[maybe_unused]] asio::awaitable<void> probe_request_stream(pylai::route::Get<"/x">& request)
 {
 	std::byte buffer[8]{};
 	co_await asio::async_read(request, asio::buffer(buffer), asio::use_awaitable);

@@ -78,7 +78,6 @@ asio::awaitable<void> Session::run()
 		if(!co_await read_headers()) co_return;
 
 		auto& req = parser.current();
-		req.body_reader = this; // 交棒：handler 通过 req.body() / read_some() 回来拉字节
 		body_read = 0;
 		body_finished = !req.has_body();
 
@@ -93,7 +92,7 @@ asio::awaitable<void> Session::run()
 
 		try
 		{
-			co_await routes.dispatch(req, *this);
+			co_await routes.dispatch(req, *this, *this); // 读通道 + 写通道都是本连接
 		}
 		catch(const http::BodyError& e)
 		{
@@ -101,8 +100,6 @@ asio::awaitable<void> Session::run()
 			body_status = e.status();
 			log::warn("[{}] {}", remote, e.what());
 		}
-
-		req.body_reader = nullptr;
 
 		if(body_failed)
 		{
