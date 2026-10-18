@@ -7,7 +7,7 @@
 
 | 文件 | 作用 |
 |---|---|
-| `deps.cmake` | 集中引入第三方依赖（`jk` 与其他库都走 `find_package`，由 vcpkg 提供 —— `jk` 在我们的 overlay 端口 `ports/jk` 里；Linux 另加 liburing） |
+| `deps.cmake` | 集中引入第三方依赖（`jk` 与其他库都走 `find_package`，由 vcpkg 提供 —— `jk` 来自 `joker-registry` 的端口 `jk`；Linux 另加 liburing） |
 | `pylaiConfig.cmake.in` | `cmake --install` 后生成 `pylaiConfig.cmake` 的模板：`find_dependency` 依赖链 + 引入 `pylaiTargets.cmake` |
 
 ## 不该放这里

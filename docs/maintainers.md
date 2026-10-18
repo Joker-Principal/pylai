@@ -9,12 +9,12 @@
 
 | 依赖 | 来源 |
 |---|---|
-| **jk** | `ports/jk/` 这个 **overlay port**（钉 tag `v2.0.0`） |
-| **asio** | `find_package`；1.38.2 由 `ports/asio/` 这个 **overlay port** 提供 |
+| **jk** | `find_package(jk)`；2.0.0 来自 git registry `joker-registry` 的 `ports/jk`（钉 tag `v2.0.0`） |
+| **asio** | `find_package`；1.38.2 来自同一个 registry 的 `ports/asio`（内置端口停在 1.32.0） |
 | **Boost / OpenSSL** | `find_package`（vcpkg） |
 | **liburing** | 仅 Linux：`PkgConfig` + `pkg_check_modules` |
 
-改 jk 的版本 = 改三处：`ports/jk/portfile.cmake` 的 `REF` / `SHA512`、`ports/jk/vcpkg.json` 的 `version`。
+改 jk 的版本 = 在 `joker-registry` 仓里改三处（`ports/jk/portfile.cmake` 的 `REF` / `SHA512`、`ports/jk/vcpkg.json` 的 `version`），发布后把新 commit 填回本仓 `vcpkg-configuration.json` 的 `baseline`。**本仓库不再保存 `ports/` 副本**，端口只在 registry 仓维护。
 ⚠️ vcpkg **不导出** `PKG_CONFIG_PATH` ⇒ 用 pkg-config 的库要自己按 triplet 补（`buildsystem/deps.cmake` 里 liburing 那段；安装后的包由 `pylaiConfig.cmake` 补）。
 
 ### 1.2 预设：tracked 只管公共部分，机器本地信息自己准备
@@ -42,7 +42,9 @@
 - 验证方式：装到工作区内的临时前缀，再建一个**独立工程**（`find_package(pylai 0.1 REQUIRED CONFIG)` + `import pylai;`）→ configure / build / 运行。探针在 `.vscode/tmp/consumer-check/`（不在版本库）。
 - ⚠️ 只装 Debug 时，消费方用 **Ninja Multi-Config** 会报 `IMPORTED_LOCATION not set for imported target "joker::module" configuration "RelWithDebInfo"` ⇒ 用单配置 Ninja，或把各配置都装上。
 
-### 1.5 如果别人把我们当 vcpkg 端口用（❓ 未验证）
+### 1.5 历史：把项目当 vcpkg 端口用时的坑（overlay 方案，🔄 已被 §1.6 取代）
+
+> 早期只想到 overlay ports；下表是当时逐条分析出的坑。现已改用 git registry（§1.6），其中大部分不再成立。
 
 要这么干，消费方得自己写一个 `ports/pylai/portfile.cmake`（指向本仓库）并加进**他们项目**的 `overlay-ports`。会遇到：
 
@@ -59,16 +61,18 @@
 
 已经做对的部分：导出用 `_IMPORT_PREFIX` 相对路径（可 relocate）· `liburing` 用 `"platform": "linux"` 门控 · `pylaiConfig.cmake` 用 `find_dependency` 把依赖接力出去。
 
-**结论（🟡）**：目前最合适的集成方式是 **`add_subdirectory` 或安装后的 `find_package(pylai)`**。真要发 vcpkg 端口，需要把 `ports/asio` 与 `ports/jk` 一并交付（独立 registry，或让消费方把它们一起纳入 overlay），且消费方必须是 Ninja + C++23。
+**结论（✅ 2026-10-18 现况）**：三种方式并存 —— `add_subdirectory`、安装后的 `find_package(pylai)`、以及**已落地的 git registry `joker-registry`**（消费方声明一次，`pylai` / `jk` / `asio` 就都从那里解析，见 §1.6）。无论哪种，消费方都必须是 Ninja + C++23。
 
-### 1.6 替代方案：自建 vcpkg **registry**（✅ 已验证）
+### 1.6 注册表方案：`joker-registry`（✅ 已验证，已是唯一来源）
 
-把 `ports/` 做成 registry 而不是 overlay，能解决 §1.5 里最要命的两条：
+`jk` / `asio` / `pylai` 的端口都放在 [`joker-registry`](https://github.com/Joker-Principal/joker-registry) 仓；
+本仓库**自己也只用**这个 registry（`vcpkg-configuration.json` 里 `packages: [asio, jk]` + `baseline`），不再保留 `ports/` 副本。
+相对 §1.5 的 overlay 方案，它解决最要命的两条：
 
 - **传递性**：registry 由**消费方**声明，但**对所有端口名解析生效**（包括依赖的依赖）⇒ 他们声明一次，`pylai` / `jk` / `asio` 都从我们的 registry 取，不用复制 overlay 目录。
 - **版本可复现**：每个版本写进 `versions/<前缀>/<port>.json` + `versions/baseline.json`；消费方钉一个 baseline commit，可显式升级 / 回退。
 
-官方要求的仓库结构（registry 只认**仓库根**的 `ports` 与 `versions`，git registry 没有“子目录”选项）：
+registry 仓的结构（它只认**仓库根**的 `ports` 与 `versions`，git registry 没有“子目录”选项）：
 
 ```text
 ports/pylai/{portfile.cmake,vcpkg.json}
@@ -94,22 +98,22 @@ vcpkg x-add-version --x-builtin-ports-root=./ports --x-builtin-registry-versions
 {
   "registries": [{
     "kind": "git",
-    "repository": "https://github.com/Joker-Principal/pylai",
-    "baseline": "<我们仓库的某个 commit>",
+    "repository": "https://github.com/Joker-Principal/joker-registry",
+    "baseline": "<registry 仓 master 的 commit>",
     "packages": [ "pylai", "jk", "asio" ]
   }]
 }
 ```
 
 ⚠️ `packages` 必须**三个都列**：漏 `jk` 就找不到端口，漏 `asio` 会退回内置的 1.32。
-⚠️ 他们的 `vcpkg.json` 还需要 `builtin-baseline`（版本化模式的要求）。
+⚠️ 用了 `registries` 就还得给默认 registry 一个 baseline：推荐写在 `vcpkg-configuration.json` 的 `"default-registry": { "kind": "builtin", "baseline": "<vcpkg 根 commit>" }`（配置归配置），等价写法是 `vcpkg.json` 的 `builtin-baseline`；两个都没有时 configure 报 `Using registries requires that a baseline is set for the default registry…`。本仓库就是写在 configuration 里的。
 
 **仍然解决不了的**：§1.5 里 modules 那三条（BMI 由消费方生成 ⇒ Ninja + C++23）· 端口与 `add_subdirectory` 并存撞模块 · CRT / triplet 必须一致。
 其中“标准不随 target 导出”可以顺手修：给两个 target 加 `target_compile_features(... PUBLIC cxx_std_23)`。
 
 **成本**：多一个 `ports/pylai` 端口 + `versions/` 目录；每次发版要 `x-add-version` 并推送新的 baseline commit。
 
-**✅ 2026-10-18 实测（本地 git registry）**：独立工程只写 `vcpkg.json`（`dependencies: ["pylai"]` + `builtin-baseline`）与 `vcpkg-configuration.json`（`kind: git` 指向本地 registry 仓 + `packages: [pylai, jk, asio]`），vcpkg 就装出了 `pylai 0.1.0` + `jk 2.0.0` + `asio 1.38.2`，消费方 `import pylai;` 编译 / 链接 / 运行全绿。
+**✅ 2026-10-18 实测（registry 已上传 GitHub）**：registry 仓 = `git@github.com:Joker-Principal/joker-registry.git`（同仓的 https 形式亦可），`master` 当前为 `964e6ce`，baseline 就指向它；其中 `pylai` 端口钉 `52ec2b0`、`port-version` 为 1（之前内容变而不改 `version` 会导致 `x-add-version` 报 `checked-in files have changed but the version was not updated`）。独立工程只写 `vcpkg.json`（`dependencies: ["pylai"]` + `builtin-baseline`）与 `vcpkg-configuration.json`（`kind: git` + `packages: [pylai, jk, asio]`），vcpkg 就从 GitHub 装出 `pylai 0.1.0#1` + `jk 2.0.0` + `asio 1.38.2`，消费方 `import pylai;` 编译 / 链接 / 运行全绿（GCC 16.2.1 验过；更早一次是 clang 23）。
 
 ⚠️ **GCC 也能编（2026-10-18 修订）**：先前记的“端口构建必须用 clang，因为 GCC 16 在 asio `co_composed.hpp` 编不过、属上游”是**错的**。真实原因是两条，都已修：
 

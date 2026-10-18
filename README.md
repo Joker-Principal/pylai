@@ -88,6 +88,33 @@ target_link_libraries(app PRIVATE pylai::pylai)   # pylai::asio-module 会跟着
 - **依赖不随包安装**（asio / Boost / OpenSSL / jk / llhttp / fmt / spdlog），由 `pylaiConfig.cmake` 自己 `find_dependency`。
   其他限制（只装 Debug 的多配置问题）→ `docs/maintainers.md` §1.4。
 
+## 通过 vcpkg registry 获取
+
+`pylai` 与它需要的 `jk` / `asio` 端口都在 [`joker-registry`](https://github.com/Joker-Principal/joker-registry)。
+消费方两步：
+
+`vcpkg.json`：
+
+```json
+{ "dependencies": [ "pylai" ] }
+```
+
+`vcpkg-configuration.json`（`baseline` 取 registry 仓 `master` 的 commit；`default-registry` 用你本机 vcpkg 根的 commit）：
+
+```json
+{
+  "default-registry": { "kind": "builtin", "baseline": "<vcpkg 根 commit>" },
+  "registries": [{
+    "kind": "git",
+    "repository": "https://github.com/Joker-Principal/joker-registry",
+    "baseline": "964e6ceaaf024c44f927c5c9a4e1ab29d3585607",
+    "packages": [ "pylai", "jk", "asio" ]
+  }]
+}
+```
+
+然后 `find_package(pylai 0.1 REQUIRED CONFIG)`。`packages` 三个都要列（漏 `jk` 找不到端口，漏 `asio` 会退回内置 1.32）。
+
 ## 目录地图（想深入代码时看）
 
 | 目录 | 职责 | 详见 |
@@ -96,12 +123,11 @@ target_link_libraries(app PRIVATE pylai::pylai)   # pylai::asio-module 会跟着
 | `standalone/` | asio → C++20 module 封装（target `asio-module`） | `standalone/README.md` |
 | `tests/` | 示例应用 + 端到端验证 | `tests/README.md` |
 | `buildsystem/` | CMake 的依赖引入与包配置模板 | `buildsystem/README.md` |
-| `ports/` | vcpkg overlay ports（asio 1.38.2 由此提供） | `ports/README.md` |
 | `tools/` | 仓库内小工具（clice 启动器） | `tools/README.md` |
 | `boost/` | boost.asio 的 module 封装草稿（未参与构建） | `boost/README.md` |
 | `docs/` | 调研笔记、设计文档、维护者手册 | `docs/README.md` |
 
-工作区**之外**但要经常查的目录（vcpkg 根等）→ `docs/vcpkg.md`。
+工作区**之外**但要经常查的目录（vcpkg 根等）属于你自己的编译环境，本项目文档不写具体路径。
 
 ## 文档
 

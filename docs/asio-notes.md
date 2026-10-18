@@ -15,7 +15,7 @@
 
 | 项 | 值 |
 |---|---|
-| asio | **1.38.2**，通过 **overlay port** 提供（见 §1），不是 vcpkg 内置端口 |
+| asio | **1.38.2**，通过自建端口（`joker-registry`）提供（见 §1），不是 vcpkg 内置端口 |
 | liburing | vcpkg 端口，静态 `liburing.a` + `liburing.pc` |
 | OpenSSL | vcpkg `3.6.5`（≥3.2，理论上可支撑 ngtcp2 的 QUIC crypto） |
 | Boost | vcpkg `1.92.0`（`boost-context` / `boost-asio`） |
@@ -25,12 +25,12 @@
 
 ---
 
-## 1. ✅ asio 通过 overlay port 提供（为什么）
+## 1. ✅ asio 通过自建端口提供（为什么）
 
 - vcpkg **内置** `asio` 端口停在 **1.32.0**，不够新。
-- 因此自建 overlay port：`ports/asio/`（`vcpkg.json` / `portfile.cmake` / `CMakeLists.txt` / `asio-config.cmake`），
-  版本 `1.38.2`，SHA512 已校验。
-- 用 `vcpkg-configuration.json` 注册：`{"overlay-ports": ["./ports"]}`。
+- 因此自建端口 `ports/asio`（`vcpkg.json` / `portfile.cmake` / `CMakeLists.txt` / `asio-config.cmake`），
+  版本 `1.38.2`，SHA512 已校验；它维护在 [`joker-registry`](https://github.com/Joker-Principal/joker-registry) 仓里。
+- 本仓库用 `vcpkg-configuration.json` 的 `registries` 段按 baseline 取用（不再用 `overlay-ports`）。
 - 端口特性映射：`spawn → boost-context`、`ssl → openssl`、`regex → boost-regex`。
 - asio ≥1.36 在 C++11+ 下**默认 standalone**，不再需要 `ASIO_STANDALONE` 补丁。
 - asio ≈1.38 的源码布局变了：根目录是 `include/` + 根级 `asio.pc.in`（旧的 `asio/` 目录只是符号链接）。

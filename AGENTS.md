@@ -30,7 +30,7 @@
 代码结构说明属于**辅助**（使用者和维护者都用得上），可以留；**只有维护者才关心的**（构建内部、工具链、调试、导出坑、设计取舍）→ `docs/`。
 
 **目录地图（有哪些目录、各自一句话职责）以根 `README.md` 的「目录地图」为准** —— 本文不再抄一遍，免得两处各改各的。
-工作区**之外**的目录（vcpkg 根、构建产物、扩展目录等）→ `docs/vcpkg.md` 及 `docs/` 下同类文档。
+工作区**之外**的目录（vcpkg 根、构建产物、扩展目录等）属本机环境，由使用者自己维护（**文档不写具体路径**）。
 
 **新增或移动目录时：先写它的 `README.md`，再写代码**（并在根 `README.md` 的地图里补一行）。
 
@@ -98,7 +98,6 @@
 - 端到端验证：`python tests/run.py`（跨平台，**唯一入口**；不再有 bash 脚本）。
 - **平台差异只在 CMake / `vcpkg.json` 里分叉**（`if(CMAKE_SYSTEM_NAME …)`、manifest 的 `"platform"`），
   实现里不写 `#ifdef _WIN32`。清单与 Windows 构建步骤见 `docs/cross-platform.md`。
-- vcpkg 根：`<vcpkg 根>`；工具链配置在 `CMakeUserPresets.json`（gitignored）
 
 ---
 

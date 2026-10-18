@@ -127,4 +127,4 @@
 | 接口怎么用 | `server/README.md`（使用者手册） |
 | 现状为什么这么设计 | `http-server-plan.md` |
 | 怎么走到现状的、推翻过什么 | `changelog.md` |
-| 第三方机制与坑 | `modules.md` · `asio-notes.md` · `vcpkg.md` |
+| 第三方机制与坑 | `modules.md` · `asio-notes.md` · `maintainers.md` §1.6 |

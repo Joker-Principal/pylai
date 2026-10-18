@@ -32,7 +32,7 @@ Circular dependency detected in the C++ module import graph
 
 ✅ **2026-10-13 新增的两条外部边**：`:route` 现在 `import jk;`（用 jk 的 `Callable` 做 `pmf` 类型萃取）；
 `:http` 现在 `import asio;`（交棒后 `Request` 的读体接口是协程，见 `http-server-plan.md` §4.1.2）。
-两者都是由独立 target 提供的模块（`joker::module` 来自 vcpkg 端口 `ports/jk`，`asio-module` 来自本仓库），不参与分区环，所以不影响上面的 DAG。
+两者都是由独立 target 提供的模块（`joker::module` 来自 vcpkg registry 里的端口 `jk`，`asio-module` 来自本仓库），不参与分区环，所以不影响上面的 DAG。
 
 ```
 jk  ──→  :route
@@ -59,7 +59,7 @@ but is currently enabled; … cannot be loaded due to a configuration mismatch
 ⇒ 根 `CMakeLists.txt` 设 `set(CMAKE_CXX_EXTENSIONS OFF)` 对齐。ninja 直接构建能容忍这种混用，
 **只有 clice 的 PCM 复用会硬失败** —— 而后果不是把报错拍在脸上，是**索引静默退化**（该文件只剩扫描级符号，导航缺一半）。
 
-📌 **现状（2026-10-18 起）**：jk 改由 vcpkg 端口 `ports/jk` 构建，端口构建时不设 `CMAKE_CXX_STANDARD` ⇒
+📌 **现状（2026-10-18 起）**：jk 由 `joker-registry` 的 `ports/jk` 端口构建，端口构建时不设 `CMAKE_CXX_STANDARD` ⇒
 jk 按自己的 `cxx_std_20` 编（`-std=c++20`），我们的 TU 仍是 `-std=c++23`。
 CMake 4.4 会为不同标准生成配套的 BMI / 合成 target，**构建不受影响**；但 clice 复用 PCM 仍要求选项一致 ——
 索引异常时先查这一条。

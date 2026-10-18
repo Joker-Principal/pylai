@@ -20,6 +20,12 @@
 
 ## 阶段 1 · 框架形态定形
 
+- **2026-10-18 · S1-R22 · 主仓改走 `joker-registry`；删掉 `ports/` 与 `docs/vcpkg.md`** ✅ —— 用户三点：“`ports/` 应该删除，因为完全是 registry 用法了” · “baseline 应该放进 vcpkg-configuration，防止用户的 vcpkg 版本较久导致失败” · “`docs/vcpkg.md` 不需要了，在 maintainers 里解释、在 README 告知用户可用 registry”。
+  **配置**：`vcpkg-configuration.json` 的 `overlay-ports` → `registries`（`kind: git` → `https://github.com/Joker-Principal/joker-registry`，`baseline` = `964e6ce`，`packages: [asio, jk]`），并把默认 registry 的 baseline 写进同文件的 `default-registry`（而非 `vcpkg.json` 的 `builtin-baseline`）—— 只声明 `registries` 而不给默认 registry baseline 时 configure 报 `Using registries requires that a baseline is set for the default registry or that the default registry is null`；两种写法等价，放 configuration 是为了让 `vcpkg.json` 只管依赖。
+  **`ports/` 删除**：删前逐文件对比过 registry 仓（`diff -r` 无差异，registry 还多 `ports/pylai`），端口此后只在 registry 仓维护。
+  **文档**：`docs/vcpkg.md` 先并入 `docs/maintainers.md` §1.7，**随后整节删除**（vcpkg 根属使用者自身的编译环境，文档只写通用说明）；根 `README.md` 加「通过 vcpkg registry 获取」；`AGENTS.md`、`docs/README.md`、`coding-discipline.md`、`modules.md`、`asio-notes.md`、`buildsystem/README.md` 的引用同步。
+  **验证**：重装后 `vcpkg-lock.json` 记录 joker-registry，`status` 里是 `asio 1.38.2` / `jk 2.0.0`，其余依赖版本未变；clang 与 GCC 两侧 build exit 0 + `python tests/run.py` ALL PASS。
+
 - **2026-10-18 · S1-R21 · 修掉“GCC 编不过”的两个真原因；`asio.cpp` 不再是模块实现单元** ✅ —— 用户质疑：“我们的 asio-module 是静态库，如果一个静态成员因为 asio-module 声明了强定义就无法链接，那岂不是很多静态成员都会出现这个问题”。
   **实测否定了“普遍冲突”**：`asio.cpp.o` 里 10 个 `execution_context_service_base<T>::id` 只有 `config_service` 一个是 `GLOBAL`（非 COMDAT），其余 9 个是 `u`；普通 TU 里 10 个全是 `u`。
   **根因**：`config_service::id` 是唯一在**接口单元 `asio.cppm` 里也被实例化**的一个（`nm -C asio.cppm.o` 只有它），GCC 因此把它当**模块附属实体**，在实现单元里发强定义；消费方 TU 照旧发 `u` ⇒ `u` + 强定义 = multiple definition。
@@ -27,9 +33,10 @@
   **另一半**：`co_composed.hpp` 依赖 `std::tuple_size`，三个 TU 缺 `<tuple>` 时退化成按基类解构并报 `cannot decompose class type` —— `server/http.cppm` / `server/route.checks.cpp` / `tests/stream_concepts.cpp` 各补缺失头。
   **验证**：GCC 16.2.1（`debug_gcc`）与 clang 23（`debug_llvm`）构建均 exit 0，`python tests/run.py` 两侧 ALL PASS（30 条）。
   **复核**：`nm -C build-dev_gcc/standalone/Debug/libasio-module.a | grep 'execution_context_service_base<asio::config_service>::id'` → `u`（不应为 `B`）。
+  **registry 同步**：`ports/pylai` 改钉 `52ec2b0`，`port-version` 升到 1（内容变而 `version` 不变时 `x-add-version` 会报 `checked-in files have changed but the version was not updated`）；registry 仓上传到 `git@github.com:Joker-Principal/joker-registry.git`（`master` = `964e6ce`），从远端拉取的 GCC 消费工程全绿，本地目录随后删除。
 
 - **2026-10-18 · S1-R20 · 自建 vcpkg registry（joker-registry）并用独立工程验收** ✅ —— 用户：“我想建一个我个人相关的库项目的 registry，目前包括 jk 和 pylai，以后还会添加更多”。
-  **产物**（`joker-registry`，先建在工作区内、上传后删除）：`ports/{jk 2.0.0, asio 1.38.2, pylai 0.1.0}` + `versions/{baseline.json, j-/jk.json, a-/asio.json, p-/pylai.json}`。`asio` 是**第三方**，只为 pylai 钉到 1.38.2（内置端口停在 1.32.0）。`x-add-version --x-builtin-ports-root=./ports --x-builtin-registry-versions-dir=./versions <port>` 生成版本库；端口清单先用 `vcpkg format-manifest` 规范成 2 空格缩进（否则 `x-add-version` 拒收）。
+  **产物**（`joker-registry`，现已上传：`git@github.com:Joker-Principal/joker-registry.git`）：`ports/{jk 2.0.0, asio 1.38.2, pylai 0.1.0}` + `versions/{baseline.json, j-/jk.json, a-/asio.json, p-/pylai.json}`。`asio` 是**第三方**，只为 pylai 钉到 1.38.2（内置端口停在 1.32.0）。`x-add-version --x-builtin-ports-root=./ports --x-builtin-registry-versions-dir=./versions <port>` 生成版本库；端口清单先用 `vcpkg format-manifest` 规范成 2 空格缩进（否则 `x-add-version` 拒收）。
   **验收方式**：另建一个独立工程，只写 `dependencies: ["pylai"]` + `builtin-baseline`，以及 `vcpkg-configuration.json` 的 `kind: git` + `packages: [pylai, jk, asio]` → vcpkg 装出 `pylai 0.1.0` / `jk 2.0.0` / `asio 1.38.2`，消费方 `import pylai;` 编译 / 链接 / 运行全绿。这验证了 §1.6 判断：**registry 能解决 overlay 不传递**（`jk`/`asio` 跟着 pylai 一起解析到）。
   **暴露并修复的两个真 bug**：① `include(GNUInstallDirs)` 原本在 `add_subdirectory` 之后 ⇒ **全新构建**（端口构建就是）里 `${CMAKE_INSTALL_INCLUDEDIR}` 为空，install 写到 `/asio-module`；本地从第二次 configure 起因为缓存变量存在而“看起来正常”——提交 `25b63bd`；② `server/http.cppm` 缺 `<coroutine>`（它只在 GCC 上报错），提交 `55dad0c`。
   **⚠️ 工具链结论（🔄 修订于 S1-R21）**：原文记“GCC 16 支持不了，属 asio 上游不兼容” —— **这条是错的**。真实原因是 ① 三个 TU 缺 `<tuple>` / `<typeinfo>`（`co_composed.hpp` 依赖 `std::tuple_size`）；② `standalone/asio.cpp` 写成模块实现单元，使 `execution_context_service_base<config_service>::id` 在 GCC 下成为**模块附属实体的强定义**，与消费方 TU 的 GNU unique 冲突。修完后 GCC 16.2.1 构建 + 端到端 30 条全过，既不需要 `CC=clang CXX=clang++`，也不需要 `-fno-gnu-unique`。
