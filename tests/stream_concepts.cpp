@@ -7,6 +7,11 @@
 // ⚠️ 这些函数**不被调用**，只要求编得过 —— 因为通道是抽象类，运行期只有 `Session` 自己实现它们。
 #include <coroutine>
 #include <cstddef>
+#include <exception>
+#include <memory>
+#include <new>
+#include <tuple>
+#include <typeinfo>
 
 import asio;
 import pylai;
