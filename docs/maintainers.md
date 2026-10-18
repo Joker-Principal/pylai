@@ -136,20 +136,7 @@ vcpkg x-add-version --x-builtin-ports-root=./ports --x-builtin-registry-versions
 - CMake Tools 也行（状态栏按钮，或命令 `cmake.configure` / `cmake.build`），但它**不返回可读输出** ⇒ 错误看 **Problems 面板**，原始输出走终端。
 - 破坏性命令（`cmake.resetState` / `cmake.clean` / `cmake.fullCleanConfigure` / `cmake.*All`）要用户确认后再执行。
 
-### 2.3 用 clice 查代码
-
-路由的 pattern 层是**编译期**的（`route.cppm` 的 `pylai::route`）——"路由表"本身就是一堆类型 / 常量，正是索引擅长回答的东西：
-
-```bash
-clice_launcher query --method documentSymbols --path server/route.cppm --fresh
-clice_launcher query --method symbolSearch    --symbol 'health'   --limit 5
-clice_launcher query --method references      --symbol 'catch_all'
-clice_launcher query --method definition      --symbol 'parse_into'
-```
-
-⚠️ **每次 `cmake --preset` 都会重写 `compile_commands.json`** ⇒ 索引过期；查询前加 `--fresh`，或先 `clice_launcher index`。答案里的 `stale` 字段务必看。完整纪律与其余方法见全局 skill `~/.agents/skills/clice-cli/` 与 `AGENTS.md` §3。
-
-### 2.4 调试（VS Code + CodeLLDB）
+### 2.3 调试（VS Code + CodeLLDB）
 
 `.vscode/launch.json` 三个配置（`preLaunchTask` 会先构建）：
 

@@ -269,4 +269,4 @@ co_await res.status(201).content_type("application/json").header("X-Trace", "abc
 
 ## 想深入
 
-clice 查询、调试配置、写死在源码顶部的常量、与 `standalone/` 的边界、编译期用例的位置 → `docs/maintainers.md`。
+调试配置、写死在源码顶部的常量、与 `standalone/` 的边界、编译期用例的位置 → `docs/maintainers.md`。

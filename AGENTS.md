@@ -51,39 +51,6 @@
 
 ## 3. 工具纪律
 
-### clice —— C++ 代码的**默认入口**（先 clice，再考虑 grep）
-
-**只要问题在问“符号”，就先 clice**：定义 / 引用 / 调用图 / 类型层次 / 影响面 / 跨文件重构。
-逐个 `grep` + `read_file` 自己去拼是**下策**（慢、且会漏掉签名与重载）。
-
-**三条硬规矩**
-
-1. **有可能用 clice，就一定用** —— 不是“可以考虑”，是“只要存在用法就不许绕过”。
-2. **用不顺手（报错 / 接口对不上 / 索引不灵）⇒ 立刻讲**，由用户介入；**用成了 ⇒ 记进本文件**（一行、可复现就够）。
-3. **做不到的一律不记** —— 本文件只留 clice 能做到的用法，别让做不到的条目稀释上面这条准则。
-
-| 要问的 | 走哪里 |
-|---|---|
-| 某符号在哪定义 / 被谁用 / 改它会影响谁（含跨文件、模板实例） | **clice**（或 VS Code 的 `vscode_listCodeUsages` / `vscode_renameSymbol`） |
-| 改名、重构 | **clice**（先 `--dry-run`）或 `vscode_renameSymbol` |
-| 纯文本 —— 注释、错误消息、配置、`CMakeLists`、文档里写的名字 | grep（clice 看不到这些） |
-| clice 报错 / 索引坏掉时的兜底 | grep + 编译 |
-
-- 入口 `clice_launcher`（全局启动器；用法与全部经验见全局 skill `~/.agents/skills/clice-cli/`）；**本地 `--help` 是接口真相**。照该 skill 的配方用；**只有**发现配方与本机 `--help` 不一致（如 unknown option）
-  ⇒ 才按本机版本读 `clice-io/clice` 的 `docs/` 拿准新用法并**回填全局 skill**（本机 clice 几乎每天更新）。
-- ⚠️ 每次 `cmake --preset` 都会重写 compile_commands.json → 查询加 `--fresh` 或先 `clice_launcher index`；
-  没索引且没 `--fresh` 直接报错；`stale` 字段务必看。
-- 内部链接符号（static / 匿名命名空间）查不到名字 → 用答案里的 `#<hex>` + `--path`。
-- `refactor rename` 会改文件：先 `--dry-run`。其余细节见全局 skill 的 `ADVANCED.md`。
-- **验证通道用 `query`，不用 `lint`**：`clice_launcher query --method documentSymbols --path <f> --fresh`
-  （`--fresh` 会先把改动过的文件重索引 = 重编译）；**新符号出现在索引里 ⇒ 该 TU 编译过**。
-  `lint` 是 clang-tidy 那套命名检查，慢且跑偏，只在要查命名时用。
-- **改名 / 影响面复核**（已验证）：`query --method symbolSearch --symbol '<新名>' --fresh` 拿 `#<hex>`，
-  再 `query --method references --symbol '#<hex>' --include-declaration` 列全部引用点。
-  判据三者齐了才叫改完：**新名引用点齐全 + 旧的类型名零引用 + `stale` 为空**。
-- ⚠️ 索引坏了、或写锁被编辑器里的 `clice serve` 占着：CLI 拿不到写锁（**重载窗口没用**，只会换个 server 继续占）。
-  处置 = 让 server 松手（禁用 clice 扩展）+ 删 `.clice/cache` 重建。
-
 ### 注意利用 VS Code 的命令
 
 - VS Code 及其安装的扩展会注册很多命令，可通过命令 ID 调用，会比终端或读写文件等更快。
