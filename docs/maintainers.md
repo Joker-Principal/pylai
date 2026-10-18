@@ -61,7 +61,7 @@
 
 **结论（🟡）**：目前最合适的集成方式是 **`add_subdirectory` 或安装后的 `find_package(pylai)`**。真要发 vcpkg 端口，需要把 `ports/asio` 与 `ports/jk` 一并交付（独立 registry，或让消费方把它们一起纳入 overlay），且消费方必须是 Ninja + C++23。
 
-### 1.6 替代方案：自建 vcpkg **registry**（✅ 官方机制 / ❓ 未落地）
+### 1.6 替代方案：自建 vcpkg **registry**（✅ 已验证）
 
 把 `ports/` 做成 registry 而不是 overlay，能解决 §1.5 里最要命的两条：
 
@@ -108,6 +108,17 @@ vcpkg x-add-version --x-builtin-ports-root=./ports --x-builtin-registry-versions
 其中“标准不随 target 导出”可以顺手修：给两个 target 加 `target_compile_features(... PUBLIC cxx_std_23)`。
 
 **成本**：多一个 `ports/pylai` 端口 + `versions/` 目录；每次发版要 `x-add-version` 并推送新的 baseline commit。
+
+**✅ 2026-10-18 实测（本地 git registry）**：独立工程只写 `vcpkg.json`（`dependencies: ["pylai"]` + `builtin-baseline`）与 `vcpkg-configuration.json`（`kind: git` 指向本地 registry 仓 + `packages: [pylai, jk, asio]`），vcpkg 就装出了 `pylai 0.1.0` + `jk 2.0.0` + `asio 1.38.2`，消费方 `import pylai;` 编译 / 链接 / 运行全绿。
+
+⚠️ **GCC 也能编（2026-10-18 修订）**：先前记的“端口构建必须用 clang，因为 GCC 16 在 asio `co_composed.hpp` 编不过、属上游”是**错的**。真实原因是两条，都已修：
+
+1. **三个 TU 缺头**：`co_composed.hpp` 靠 `std::tuple_size` 判断结构化绑定，缺 `<tuple>` 时它退化成“按基类解构”并报 `cannot decompose class type`（`server/http.cppm`、`server/route.checks.cpp`、`tests/stream_concepts.cpp` 分别补了 `<tuple>` / `<typeinfo>` 等）。
+2. **`standalone/asio.cpp` 曾被写成模块实现单元**（`module asio;`）：`execution_context_service_base<config_service>::id` 同时在接口单元 `asio.cppm` 里被实例化 ⇒ GCC 视其为**模块附属实体**，在实现单元里发**非 COMDAT 强定义**，与消费方 TU 的 GNU unique（`nm` 显示 `u`）冲突。`src.hpp` 只要求 `ASIO_SEPARATE_COMPILATION`，写成普通 TU 即可 —— 10 个 `id` 全回到 `u`。
+
+复核：`nm -C build-*/standalone/*/libasio-module.a | grep 'execution_context_service_base<asio::config_service>::id'` 应是 `u`（或加 `-fno-gnu-unique` 后的 `V`），**不应出现 `B`**。
+
+⚠️ 这一步暴露了两个真 bug（已修）：`include(GNUInstallDirs)` 原本在 `add_subdirectory` 之后（全新构建时 `${CMAKE_INSTALL_INCLUDEDIR}` 为空 ⇒ 装到 `/asio-module`）；`http.cppm` 缺 `<coroutine>`（GCC 才报）。
 
 ## 2. 工具
 

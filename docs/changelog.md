@@ -20,6 +20,21 @@
 
 ## 阶段 1 · 框架形态定形
 
+- **2026-10-18 · S1-R21 · 修掉“GCC 编不过”的两个真原因；`asio.cpp` 不再是模块实现单元** ✅ —— 用户质疑：“我们的 asio-module 是静态库，如果一个静态成员因为 asio-module 声明了强定义就无法链接，那岂不是很多静态成员都会出现这个问题”。
+  **实测否定了“普遍冲突”**：`asio.cpp.o` 里 10 个 `execution_context_service_base<T>::id` 只有 `config_service` 一个是 `GLOBAL`（非 COMDAT），其余 9 个是 `u`；普通 TU 里 10 个全是 `u`。
+  **根因**：`config_service::id` 是唯一在**接口单元 `asio.cppm` 里也被实例化**的一个（`nm -C asio.cppm.o` 只有它），GCC 因此把它当**模块附属实体**，在实现单元里发强定义；消费方 TU 照旧发 `u` ⇒ `u` + 强定义 = multiple definition。
+  **修法**：`src.hpp` 只要求 `ASIO_SEPARATE_COMPILATION`，`standalone/asio.cpp` 写成**普通 TU**（`#include <asio/impl/src.hpp>`，删掉 `module asio;`）。库与消费方都回到 `u`，无需 `-fno-gnu-unique`。
+  **另一半**：`co_composed.hpp` 依赖 `std::tuple_size`，三个 TU 缺 `<tuple>` 时退化成按基类解构并报 `cannot decompose class type` —— `server/http.cppm` / `server/route.checks.cpp` / `tests/stream_concepts.cpp` 各补缺失头。
+  **验证**：GCC 16.2.1（`debug_gcc`）与 clang 23（`debug_llvm`）构建均 exit 0，`python tests/run.py` 两侧 ALL PASS（30 条）。
+  **复核**：`nm -C build-dev_gcc/standalone/Debug/libasio-module.a | grep 'execution_context_service_base<asio::config_service>::id'` → `u`（不应为 `B`）。
+
+- **2026-10-18 · S1-R20 · 自建 vcpkg registry（joker-registry）并用独立工程验收** ✅ —— 用户：“我想建一个我个人相关的库项目的 registry，目前包括 jk 和 pylai，以后还会添加更多”。
+  **产物**（`joker-registry`，先建在工作区内、上传后删除）：`ports/{jk 2.0.0, asio 1.38.2, pylai 0.1.0}` + `versions/{baseline.json, j-/jk.json, a-/asio.json, p-/pylai.json}`。`asio` 是**第三方**，只为 pylai 钉到 1.38.2（内置端口停在 1.32.0）。`x-add-version --x-builtin-ports-root=./ports --x-builtin-registry-versions-dir=./versions <port>` 生成版本库；端口清单先用 `vcpkg format-manifest` 规范成 2 空格缩进（否则 `x-add-version` 拒收）。
+  **验收方式**：另建一个独立工程，只写 `dependencies: ["pylai"]` + `builtin-baseline`，以及 `vcpkg-configuration.json` 的 `kind: git` + `packages: [pylai, jk, asio]` → vcpkg 装出 `pylai 0.1.0` / `jk 2.0.0` / `asio 1.38.2`，消费方 `import pylai;` 编译 / 链接 / 运行全绿。这验证了 §1.6 判断：**registry 能解决 overlay 不传递**（`jk`/`asio` 跟着 pylai 一起解析到）。
+  **暴露并修复的两个真 bug**：① `include(GNUInstallDirs)` 原本在 `add_subdirectory` 之后 ⇒ **全新构建**（端口构建就是）里 `${CMAKE_INSTALL_INCLUDEDIR}` 为空，install 写到 `/asio-module`；本地从第二次 configure 起因为缓存变量存在而“看起来正常”——提交 `25b63bd`；② `server/http.cppm` 缺 `<coroutine>`（它只在 GCC 上报错），提交 `55dad0c`。
+  **⚠️ 工具链结论（🔄 修订于 S1-R21）**：原文记“GCC 16 支持不了，属 asio 上游不兼容” —— **这条是错的**。真实原因是 ① 三个 TU 缺 `<tuple>` / `<typeinfo>`（`co_composed.hpp` 依赖 `std::tuple_size`）；② `standalone/asio.cpp` 写成模块实现单元，使 `execution_context_service_base<config_service>::id` 在 GCC 下成为**模块附属实体的强定义**，与消费方 TU 的 GNU unique 冲突。修完后 GCC 16.2.1 构建 + 端到端 30 条全过，既不需要 `CC=clang CXX=clang++`，也不需要 `-fno-gnu-unique`。
+  **仍然治不了的**：BMI 仍由消费方生成（Ninja + C++23）· 端口与 `add_subdirectory` 并存会撞两份模块 · CRT/triplet 必须一致。完整清单见 `docs/maintainers.md` §1.5 / §1.6。
+
 - **2026-10-18 · S1-R19 · jk 改走 vcpkg overlay port；记录“别人把我们当端口用”的坑** ✅ —— 用户：“jk 库改成用 vcpkg 的 overlay ports 吧。另外，假如其他项目也用 vcpkg overlay ports 引入我们，会有什么问题”。
   **端口**：新增 `ports/jk/`（`vcpkg.json` 用 `version 2.0.0`；`portfile.cmake` 钉 tag `v2.0.0` + SHA512 —— 先在 `4509501` 这个 commit 上验证过一版，作者随后给 jk 打了 `v2.0.0` 的 tag，于是改钉 tag）。构建时传 `-DBUILD_TESTING=OFF -DJK_BUILD_TESTING=OFF`（jk 自己 `include(CTest)`、默认会拉测试）；`vcpkg_cmake_config_fixup(PACKAGE_NAME jk CONFIG_PATH "share/jk/cmake")` —— jk 把包配置装在 `share/jk/cmake` 而不是 `share/jk`。
   **切换**：`vcpkg.json` 加 `jk`；`buildsystem/deps.cmake` 去掉 `FetchContent` 与 `JK_BUILD_TESTING`，改成 `find_package(jk CONFIG REQUIRED)`。jk 现在和别的依赖一样装进 triplet（`share/jk/jkConfig.cmake` · `lib/libmodule.a` · `include/jk/`），**构建期不再拉源码**；同时 `cmake --install` 不再把 jk 一并装进我们的 prefix（S1-R17 里记的那条副作用随之消失）。
