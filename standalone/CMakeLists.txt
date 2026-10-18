@@ -18,14 +18,10 @@ target_link_libraries(asio-module PUBLIC asio::asio Boost::context OpenSSL::SSL 
 target_compile_definitions(asio-module PUBLIC
     ASIO_SEPARATE_COMPILATION=1
     ASIO_NO_DEPRECATED=1
+    $<$<PLATFORM_ID:Linux>:ASIO_HAS_IO_URING=1>
+    $<$<PLATFORM_ID:Linux>:ASIO_HAS_IO_URING_AS_DEFAULT=1>
+    $<$<PLATFORM_ID:Windows>:_WIN32_WINNT=0x0A00>
 )
-
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    target_compile_definitions(asio-module PUBLIC
-        ASIO_HAS_IO_URING=1
-        ASIO_HAS_IO_URING_AS_DEFAULT=1
-    )
-endif()
 
 # 装到 <prefix>/include/asio-module/，保留 asio/ 子目录。
 install(TARGETS asio-module

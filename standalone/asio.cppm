@@ -294,11 +294,13 @@ export namespace asio {
     }
 
     namespace posix {
+#if defined(ASIO_HAS_POSIX_STREAM_DESCRIPTOR)
+        using asio::posix::basic_descriptor;
+        using asio::posix::basic_stream_descriptor;
         using asio::posix::descriptor;
         using asio::posix::descriptor_base;
         using asio::posix::stream_descriptor;
-        using asio::posix::basic_descriptor;
-        using asio::posix::basic_stream_descriptor;
+#endif
     }
 
     namespace windows {
