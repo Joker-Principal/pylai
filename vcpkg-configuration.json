@@ -8,7 +8,7 @@
     {
       "kind": "git",
       "repository": "https://github.com/Joker-Principal/joker-registry",
-      "baseline": "964e6ceaaf024c44f927c5c9a4e1ab29d3585607",
+      "baseline": "8f119179a42bc1b8c8073b01521e50fb4aa57bed",
       "packages": [
         "asio",
         "jk"

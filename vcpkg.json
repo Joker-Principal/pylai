@@ -1,14 +1,10 @@
 {
     "name": "pylai",
-    "version": "1.0.0",
+    "version": "0.1.3",
     "dependencies": [
         "jk",
         {
             "name": "asio",
-            "features": ["spawn", "ssl"]
-        },
-        {
-            "name": "boost-asio",
             "features": ["spawn", "ssl"]
         },
         "openssl",
