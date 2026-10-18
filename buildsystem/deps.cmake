@@ -1,14 +1,4 @@
-include(FetchContent)
-
-set(JK_BUILD_TESTING OFF CACHE BOOL "Build jk tests")
-FetchContent_Declare(
-    jk
-    GIT_REPOSITORY https://github.com/Joker-Principal/jk.git
-    GIT_TAG master
-    GIT_SHALLOW TRUE
-)
-FetchContent_MakeAvailable(jk)
-
+find_package(jk CONFIG REQUIRED)
 find_package(asio CONFIG REQUIRED)
 find_package(Boost CONFIG REQUIRED COMPONENTS asio context)
 find_package(OpenSSL REQUIRED)

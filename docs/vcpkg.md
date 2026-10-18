@@ -26,11 +26,11 @@ cat <vcpkg 根>/ports/<name>/vcpkg.json
 
 vcpkg 解析包名时，**overlay port 优先于注册表**。
 本仓库通过 `vcpkg-configuration.json` 的 `"overlay-ports": ["./ports"]` 注册，
-所以 `ports/asio/` 会覆盖内置的 `asio` 端口。
+所以 `ports/asio/` 会覆盖内置的 `asio` 端口，`ports/jk/` 则提供注册表里没有的 `jk`。
 
 ## 与本仓库的其它交互点
 
-- `vcpkg.json`：声明依赖与特性（目前：`asio[spawn,ssl]`、`boost-asio[spawn,ssl]`、`openssl`、`liburing`(**仅 linux**)、`llhttp`）。
+- `vcpkg.json`：声明依赖与特性（目前：`jk`、`asio[spawn,ssl]`、`boost-asio[spawn,ssl]`、`openssl`、`liburing`(**仅 linux**)、`llhttp`）。
 - **没有** `builtin-baseline` → 未启用版本约束模式，走"当前可用端口"。
 - vcpkg **不会**导出 `PKG_CONFIG_PATH` → 用 pkg-config 的库要自己指
   （见根 `CMakeLists.txt` 里 liburing 的写法；该分支只在 Linux 上生效）。

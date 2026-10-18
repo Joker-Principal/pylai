@@ -20,6 +20,13 @@
 
 ## 阶段 1 · 框架形态定形
 
+- **2026-10-18 · S1-R19 · jk 改走 vcpkg overlay port；记录“别人把我们当端口用”的坑** ✅ —— 用户：“jk 库改成用 vcpkg 的 overlay ports 吧。另外，假如其他项目也用 vcpkg overlay ports 引入我们，会有什么问题”。
+  **端口**：新增 `ports/jk/`（`vcpkg.json` 用 `version 2.0.0`；`portfile.cmake` 钉 tag `v2.0.0` + SHA512 —— 先在 `4509501` 这个 commit 上验证过一版，作者随后给 jk 打了 `v2.0.0` 的 tag，于是改钉 tag）。构建时传 `-DBUILD_TESTING=OFF -DJK_BUILD_TESTING=OFF`（jk 自己 `include(CTest)`、默认会拉测试）；`vcpkg_cmake_config_fixup(PACKAGE_NAME jk CONFIG_PATH "share/jk/cmake")` —— jk 把包配置装在 `share/jk/cmake` 而不是 `share/jk`。
+  **切换**：`vcpkg.json` 加 `jk`；`buildsystem/deps.cmake` 去掉 `FetchContent` 与 `JK_BUILD_TESTING`，改成 `find_package(jk CONFIG REQUIRED)`。jk 现在和别的依赖一样装进 triplet（`share/jk/jkConfig.cmake` · `lib/libmodule.a` · `include/jk/`），**构建期不再拉源码**；同时 `cmake --install` 不再把 jk 一并装进我们的 prefix（S1-R17 里记的那条副作用随之消失）。
+  **代价**：改 jk 版本要动三处（`REF` / `SHA512` / `version`）；`ports/README.md` 里写明了。
+  **分析（写进 `docs/maintainers.md` §1.5）**：overlay **不传递**（消费方看不见我们的 `ports/asio`、`ports/jk`）· modules 的 BMI 由消费方生成（必须 Ninja + C++23）· 标准不随 target 导出 · 端口与 `add_subdirectory` 并存会出现两份模块 · 版本只能钉 commit · 依赖必须全 · CRT/triplet 必须一致 · overlay 目录冲突。结论：当前推荐 `add_subdirectory` 或安装后 `find_package`，不建议急着发端口。
+  验证：`cmake --preset dev_llvm` exit 0（vcpkg 构建并安装 jk）、`cmake --build --preset debug_llvm` exit 0、`python tests/run.py` → **ALL PASS（30 条）** exit 0、`cmake --install` 装 16 个文件 exit 0、独立消费工程 configure / build / 运行全绿。
+
 - **2026-10-18 · S1-R18 · 文档分层：README 面向使用者，维护者信息进 `docs/`；CMake 注释按代码规格收敛** ✅ —— 用户三条：① “CMake 脚本也要以代码的规格来维护，其中的注释也要遵守注释规则，已有的注释也有所重复”；② “根目录的 README 应该是给使用者介绍项目的，各个目录应该也基于这个原则。当然，介绍代码结构属于辅助深入了解，对使用者和维护者都有用”；③ “关于维护者需要了解的信息应该移入 docs”。
   **新文档**：`docs/maintainers.md` —— 构建系统（依赖来源 / 预设约定 / 开关 / 安装导出与验证方式）· 工具（验证入口 / 终端 vs CMake Tools / clice / VS Code 调试）· 内部细节（写死常量 / 与 `standalone/` 的边界 / 编译期用例位置）。
   **README 重构**：根 README = 「这是什么 + 3 行示例 + 平台 + 快速开始 + 安装 + 目录地图（明确标为“想深入代码时看”）+ 文档索引」；删掉「三类文档」表、CMake Tools 段落、安装的四条细节（各压成一句 + 指针）。

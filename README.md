@@ -86,7 +86,7 @@ target_link_libraries(app PRIVATE pylai::pylai)   # pylai::asio-module 会跟着
 
 - 消费方也要 C++23 + 支持 C++20 modules 的生成器（Ninja / Ninja Multi-Config）—— 模块以**接口单元源码**交付，BMI 由消费方生成。
 - **依赖不随包安装**（asio / Boost / OpenSSL / jk / llhttp / fmt / spdlog），由 `pylaiConfig.cmake` 自己 `find_dependency`。
-  其他限制（只装 Debug 的多配置问题、jk 会被一并装进同一 prefix）→ `docs/maintainers.md` §1.4。
+  其他限制（只装 Debug 的多配置问题）→ `docs/maintainers.md` §1.4。
 
 ## 目录地图（想深入代码时看）
 

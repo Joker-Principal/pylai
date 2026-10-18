@@ -11,6 +11,9 @@
 
 - `asio/` —— 把 asio 固定到 **1.38.2**。
   原因：vcpkg **内置**的 `asio` 端口停在 **1.32.0**，且特性名与我们要的不一致。
+- `jk/` —— 把 [jk](https://github.com/Joker-Principal/jk) 打成端口（钉 tag **v2.0.0**）。
+  这样它与其它依赖一样由 vcpkg 装进 triplet，构建时不再 FetchContent 拉源码。
+  ⚠️ 改版本时三处要一起改：`portfile.cmake` 的 `REF` / `SHA512`，以及 `vcpkg.json` 的 `version`。
 
 | 文件 | 作用 |
 |---|---|

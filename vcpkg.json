@@ -2,6 +2,7 @@
     "name": "pylai",
     "version": "1.0.0",
     "dependencies": [
+        "jk",
         {
             "name": "asio",
             "features": ["spawn", "ssl"]
