@@ -123,7 +123,6 @@ target_link_libraries(app PRIVATE pylai::pylai)   # pylai::asio-module 会跟着
 | `standalone/` | asio → C++20 module 封装（target `asio-module`） | `standalone/README.md` |
 | `tests/` | 示例应用 + 端到端验证 | `tests/README.md` |
 | `buildsystem/` | CMake 的依赖引入与包配置模板 | `buildsystem/README.md` |
-| `tools/` | 仓库内小工具（clice 启动器） | `tools/README.md` |
 | `boost/` | boost.asio 的 module 封装草稿（未参与构建） | `boost/README.md` |
 | `docs/` | 调研笔记、设计文档、维护者手册 | `docs/README.md` |
 

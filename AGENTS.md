@@ -67,15 +67,15 @@
 | 某符号在哪定义 / 被谁用 / 改它会影响谁（含跨文件、模板实例） | **clice**（或 VS Code 的 `vscode_listCodeUsages` / `vscode_renameSymbol`） |
 | 改名、重构 | **clice**（先 `--dry-run`）或 `vscode_renameSymbol` |
 | 纯文本 —— 注释、错误消息、配置、`CMakeLists`、文档里写的名字 | grep（clice 看不到这些） |
-| clice 报错 / 索引坏掉时的傅底 | grep + 编译 |
+| clice 报错 / 索引坏掉时的兜底 | grep + 编译 |
 
-- 入口 `tools/clice`；**本地 `--help` 是接口真相**。照 SKILL.md 的配方用；**只有**发现配方与本机 `--help` 不一致（如 unknown option）
-  ⇒ 才按本机版本读仓库 `docs/` 拿准新用法并**回填 SKILL.md**（本机 clice 几乎每天更新，做法见该文件）。
-- ⚠️ 每次 `cmake --preset` 都会重写 compile_commands.json → 查询加 `--fresh` 或先 `tools/clice index`；
+- 入口 `clice_launcher`（全局启动器；用法与全部经验见全局 skill `~/.agents/skills/clice-cli/`）；**本地 `--help` 是接口真相**。照该 skill 的配方用；**只有**发现配方与本机 `--help` 不一致（如 unknown option）
+  ⇒ 才按本机版本读 `clice-io/clice` 的 `docs/` 拿准新用法并**回填全局 skill**（本机 clice 几乎每天更新）。
+- ⚠️ 每次 `cmake --preset` 都会重写 compile_commands.json → 查询加 `--fresh` 或先 `clice_launcher index`；
   没索引且没 `--fresh` 直接报错；`stale` 字段务必看。
 - 内部链接符号（static / 匿名命名空间）查不到名字 → 用答案里的 `#<hex>` + `--path`。
-- `refactor rename` 会改文件：先 `--dry-run`。其余细节见 `.github/skills/clice-cli/SKILL.md`。
-- **验证通道用 `query`，不用 `lint`**：`tools/clice query --method documentSymbols --path <f> --fresh`
+- `refactor rename` 会改文件：先 `--dry-run`。其余细节见全局 skill 的 `ADVANCED.md`。
+- **验证通道用 `query`，不用 `lint`**：`clice_launcher query --method documentSymbols --path <f> --fresh`
   （`--fresh` 会先把改动过的文件重索引 = 重编译）；**新符号出现在索引里 ⇒ 该 TU 编译过**。
   `lint` 是 clang-tidy 那套命名检查，慢且跑偏，只在要查命名时用。
 - **改名 / 影响面复核**（已验证）：`query --method symbolSearch --symbol '<新名>' --fresh` 拿 `#<hex>`，
