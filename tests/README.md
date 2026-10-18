@@ -13,20 +13,6 @@
 
 产物可执行 target **`app`**（`build-dev_llvm/tests/Debug/app`）。
 
-> 路由那套的**编译期用例**（99 条 `static_assert`）已搬进 **`server/route.checks.cpp`** ——
-> 它是 `pylai` 的**实现单元**（`module pylai;`），因为那些断言要看树 / 建树器 / 匹配器这些**不导出**的内部件。
-> 代价是少了“顺带验收导出面”的护栏，补偿是 `main.cpp` 这个真 app 仍走 `import pylai;` 的公开面 + e2e 全程跑。
-> ⚠️ “必须编不过”的失败路径不在这里（编译期拦不住的、或拦下的错误文案）→ 人工探针，见 `docs/http-server-plan.md` §11.2。
-
-## 为什么应用不在 `server/`
-
-`server/` 只提供 **HTTP server 框架**（静态库 `pylai`），不含任何业务路由：
-- 框架不该替使用者决定有哪些路由；
-- 示例应用得**真的跑起来**才验证得了框架，所以它天然属于这里。
-
-将来它会 [herodotus](https://github.com/Joker-Principal/herodotus) 的 `clio` 取代 ——
-那时代替 `App` 的会是真正的应用，而不是示例。
-
 ## 怎么跑
 
 ```bash

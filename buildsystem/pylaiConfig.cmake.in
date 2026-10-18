@@ -1,0 +1,33 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+find_dependency(asio CONFIG)
+find_dependency(Boost CONFIG COMPONENTS asio context)
+find_dependency(OpenSSL)
+find_dependency(jk CONFIG)
+find_dependency(llhttp CONFIG)
+find_dependency(fmt CONFIG)
+find_dependency(spdlog CONFIG)
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    find_dependency(PkgConfig)
+    # vcpkg 不导出 PKG_CONFIG_PATH，按它的 triplet 补上。
+    if(DEFINED VCPKG_INSTALLED_DIR AND DEFINED VCPKG_TARGET_TRIPLET)
+        set(ENV{PKG_CONFIG_PATH}
+            "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/lib/pkgconfig:$ENV{PKG_CONFIG_PATH}")
+    endif()
+    pkg_check_modules(liburing REQUIRED IMPORTED_TARGET liburing)
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/pylaiTargets.cmake")
+
+# `server.cppm` 的全局模块片段里 `#include <plf_hive.h>`（纯头文件、vcpkg 不给 CMake 包）：
+# 消费方编译 BMIs 时也要看到它 ⇒ 找到就补进 include 路径，找不到就交给消费方自己的路径。
+find_path(PYLAI_PLF_HIVE_INCLUDE_DIR NAMES plf_hive.h)
+if(PYLAI_PLF_HIVE_INCLUDE_DIR)
+    set_property(TARGET pylai::pylai APPEND PROPERTY
+        INTERFACE_INCLUDE_DIRECTORIES "${PYLAI_PLF_HIVE_INCLUDE_DIR}")
+endif()
+
+check_required_components(pylai)

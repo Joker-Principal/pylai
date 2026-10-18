@@ -29,10 +29,6 @@
 **在 `asio.cppm`（或对应子模块）的导出清单里加一行 `using`**。
 **不要**在应用 TU 里 `#include <asio/...>` 绕过模块——module/header 混用会出问题。
 
-## 已知约束（细节与出处见 `docs/asio-notes.md`）
+## 已知坑
 
-- `ASIO_NO_DEPRECATED=1` 会让 `asio::basic_io_object` 整个消失
-  → 模块里对应的 `using` 必须加同样的守卫。
-- `asio::ssl::verify_peer` 是命名空间级 `const int`（内部链接），**不能**在模块里 re-export。
-- `#include <asio/spawn.hpp>` 只在 `ASIO_HAS_BOOST_CONTEXT_FIBER` 下才有意义；
-  `yield_context` **只**在 `spawn.hpp` 里声明。
+导出面上的坑（`basic_io_object` / `verify_peer` / `spawn.hpp`）与排查记录 → `docs/modules.md`、`docs/asio-notes.md`。

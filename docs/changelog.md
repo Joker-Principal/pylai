@@ -20,6 +20,33 @@
 
 ## 阶段 1 · 框架形态定形
 
+- **2026-10-18 · S1-R18 · 文档分层：README 面向使用者，维护者信息进 `docs/`；CMake 注释按代码规格收敛** ✅ —— 用户三条：① “CMake 脚本也要以代码的规格来维护，其中的注释也要遵守注释规则，已有的注释也有所重复”；② “根目录的 README 应该是给使用者介绍项目的，各个目录应该也基于这个原则。当然，介绍代码结构属于辅助深入了解，对使用者和维护者都有用”；③ “关于维护者需要了解的信息应该移入 docs”。
+  **新文档**：`docs/maintainers.md` —— 构建系统（依赖来源 / 预设约定 / 开关 / 安装导出与验证方式）· 工具（验证入口 / 终端 vs CMake Tools / clice / VS Code 调试）· 内部细节（写死常量 / 与 `standalone/` 的边界 / 编译期用例位置）。
+  **README 重构**：根 README = 「这是什么 + 3 行示例 + 平台 + 快速开始 + 安装 + 目录地图（明确标为“想深入代码时看”）+ 文档索引」；删掉「三类文档」表、CMake Tools 段落、安装的四条细节（各压成一句 + 指针）。
+  `server/README.md` 删掉 clice 查询 / 调试 / 与 `standalone/` 的边界 / 写死常量 / 上游去向，构建节压成一句指回根 README；`tests/README.md` 删掉「为什么应用不在 `server/`」与编译期用例说明；`standalone/README.md` 的导出坑压成一行指针（`docs/modules.md` 早有详版，属于重复）；`buildsystem/README.md` 去掉“为什么单独放”的理由。
+  **CMake 注释**：删掉根 / `standalone/` / `server/` / `tests/` 里的机制解释与历史理由（`module M:part;` 的分区规则、`BUILD_TESTING` 的来龙去脉、平台后端对照表、依赖可见性推导、安装机制），只留**外部契约**：`PYLAI_ENABLE_OBSERVATION` 因接口单元里有 `#if` 必须 PUBLIC、两处安装目录布局、`vcpkg 不导出 PKG_CONFIG_PATH`、`plf_hive` 没有 CMake 包。判据写进 `docs/coding-discipline.md` §1.1「CMake 脚本也算代码」；`AGENTS.md` §1 增一条（README 面向使用者，只有维护者关心的进 `docs/`）。
+  验证：`cmake --preset dev_llvm` exit 0、`cmake --build --preset debug_llvm` exit 0、`python tests/run.py` → **ALL PASS（30 条）**、exit 0。纯注释与文档批次，行为零变化。
+
+- **2026-10-18 · S1-R16 · 跟进 jk 的测试开关 + 自己的 `PYLAI_BUILD_TESTS`** ✅ —— 用户：“jk 的 test 开关有所改进，我们需要跟进，顺便添加自己的开关”。
+  **上游变化**：jk `4509501 [cmake] fix test option` 把 `if(BUILD_TESTING)` 改成 `if(JK_BUILD_TESTING)` —— 它的测试不再被消费方的 `BUILD_TESTING` 绑架（默认值仍取自 `BUILD_TESTING`）。
+  **我们的跟进**：原来那句 `set(BUILD_TESTING OFF CACHE BOOL … **FORCE**)` 是绕过旧写法的权宜之计；现在改成两个都不带 `FORCE` 的缓存变量（`BUILD_TESTING` / `JK_BUILD_TESTING` 均默认 OFF），命令行 `-DBUILD_TESTING=ON` / `-DJK_BUILD_TESTING=ON` 说了算。`BUILD_TESTING` 仍要关：jk 无条件 `include(CTest)`，不关它会在我们的工程里 `enable_testing()` 并造出一堆 CTest 目标。
+  **自己的开关**：`option(PYLAI_BUILD_TESTS "构建 tests/ 示例应用与端到端验证" ON)` 门控 `add_subdirectory(tests)` —— 只拿库（或只想编 `server/`）时 `-DPYLAI_BUILD_TESTS=OFF`。不影响 `server/route.checks.cpp` 的编译期自检（那是库自己的实现单元）。
+  **踩到的坑（环境）**：手动 `git fetch` jk 的浅克隆会让 FetchContent 的更新步骤做 rebase 并冲突（`无法应用 c985819…`）⇒ 处理办法是删掉 `_deps/jk-{src,subbuild,build}` 让它重新浅克隆（2026-10-18 实测有效）。
+  验证：`cmake --preset dev_llvm` exit 0（jk 已到 `4509501`）、`cmake --build --preset debug_llvm` exit 0；`-DPYLAI_BUILD_TESTS=OFF` 时 `--target help` 里**没有 `app`** 且构建 exit 0；恢复 ON 后 `python tests/run.py` → **ALL PASS（30 条）**、exit 0。
+  ⚠️ 缓存语义：关过 `PYLAI_BUILD_TESTS` 之后再跑 `cmake --preset dev_llvm` 不会自动变回 ON（缓存变量），要显式 `-DPYLAI_BUILD_TESTS=ON`。
+  🔄 **同日修订（用户改的）**：依赖块整体搬进 `buildsystem/deps.cmake`（jk 的 `JK_BUILD_TESTING OFF` 也在那儿）；根 `CMakeLists.txt` 改成 `include(CTest)` + `option(PYLAI_BUILD_TESTS … ${BUILD_TESTING})` —— 即默认跟随 `BUILD_TESTING`，不再单独钉 ON。
+
+- **2026-10-18 · S1-R17 · `cmake install`：单包 `pylai`（0.1.0，命名空间 `pylai::`）** ✅ —— 用户：“我还想添加 cmake install 相关的内容”。
+  **口径（选项卡确认）**：单包、命名空间 `pylai::`、版本 `0.1.0`。
+  **做法**：`project(pylai VERSION 0.1.0)` + `GNUInstallDirs` + `CMakePackageConfigHelpers`；两个 target 都进同一个导出集 `pylaiTargets`：
+  `standalone/` 装 `pylai::asio-module`（模块源 → `include/asio-module/`）、`server/` 装 `pylai::pylai`（→ `include/pylai/`）。
+  文件集加了 `BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}"`，保住 `asio/ssl.cppm` 这类子目录布局。
+  **模块怎么交付**：只装**接口单元源码**，不装 BMI —— 导出的 `IMPORTED_CXX_MODULES_*` 让消费方自己从这些源码生成 BMI（`pylaiTargets.cmake` 里有 `IMPORTED_CXX_MODULES_COMPILE_DEFINITIONS` / `LINK_LIBRARIES`，定义与链接口径跟着过去）。
+  **依赖不随包**：新增 `buildsystem/pylaiConfig.cmake.in` —— `find_dependency(asio / Boost[asio,context] / OpenSSL / jk / llhttp / fmt / spdlog)`；Linux 另加 `PkgConfig` + `liburing`（消费方若也用 vcpkg，按 `VCPKG_INSTALLED_DIR` 自动补 `PKG_CONFIG_PATH`）；`plf_hive.h` 没有 CMake 包 ⇒ `find_path` 找到就补进 `pylai::pylai` 的 include 路径。
+  **验证（真实消费，不只是装完看目录）**：`cmake --install build-dev_llvm --prefix .vscode/tmp/install-check --config Debug` → exit 0；另建独立工程 `.vscode/tmp/consumer-check`（`find_package(pylai 0.1 REQUIRED CONFIG)` + `target_link_libraries(app PRIVATE pylai::pylai)` + `import asio; import pylai;`）→ configure / build / 运行全绿（`consumer ok: fingerprint=16550485730201524140`）。主工程 `cmake --build --preset debug_llvm` exit 0、`python tests/run.py` **ALL PASS（30 条）**。
+  **踩到的坑**：只装了 Debug 时，消费方用 **Ninja Multi-Config** 会报 `IMPORTED_LOCATION not set for imported target "joker::module" configuration "RelWithDebInfo"` —— 消费方改用单配置 Ninja（或把各配置都装上）即可；`cmake --install` 还会把 FetchContent 的 **jk 一并装进同一个 prefix**（它自己的 install 规则在同一构建树里，属预期副作用）。
+  **没做**：不装 `tests/`；不装 BMI；没有 CPack/打包脚本。
+
 - **2026-10-18 · S1-R15 · 跨平台：Linux io_uring / Windows IOCP（构建层单点分叉）** ✅ —— 用户：“**需要添加 Windows 支持**”。
   **事实先行**：`server/`、`standalone/` 的实现里**没有** POSIX 头、`SO_REUSEPORT`、`_WIN32` 分支（`grep -rn 'unistd|sys/|arpa/|netinet/|SO_REUSEPORT|_WIN32' server standalone` 零命中）⇒ 不可移植的只有构建配置与测试入口。
   **三处分叉**（代码零改动）：① 根 `CMakeLists.txt` 把 `PkgConfig` + liburing 收进 `if(CMAKE_SYSTEM_NAME STREQUAL "Linux")`，并给 MSVC 加 `/utf-8`（源码注释含中文 UTF-8）与 `/Zc:preprocessor`（modules 前提）；② `standalone/CMakeLists.txt` 按平台拼 `ASIO_PLATFORM_LIBS`（Linux → `PkgConfig::liburing`，Windows → `ws2_32 mswsock`），`ASIO_HAS_IO_URING[_AS_DEFAULT]` 只在 Linux 定义；③ `vcpkg.json` 的 `liburing` 加 `"platform": "linux"` —— 该端口自带 `"supports": "linux"`，不门控会让 Windows 上的 configure 直接失败。

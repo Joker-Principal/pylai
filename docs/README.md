@@ -19,6 +19,7 @@
 | `modules.md` | C++ 模块在本仓库的布局与踩坑（分区 vs 独立模块、依赖 DAG、import 规则、全局模块片段） |
 | `vcpkg.md` | **工作区之外**的 vcpkg 根目录说明（怎么查端口、overlay 机制） |
 | `cross-platform.md` | **平台差异清单**（Linux io_uring / Windows IOCP / macOS kqueue；分叉点只在构建层、Windows 构建步骤、已知风险） |
+| `maintainers.md` | **维护者手册**：构建系统（依赖 / 预设 / 开关 / 安装导出）· 工具（验证入口 / clice / 调试）· 内部细节（常量 / 边界 / 编译期用例位置） |
 | `coding-discipline.md` | **编码纪律** —— 写代码时的规矩（注释、抽象、类型与字符串、错误、异步、性能习惯、第三方库）；与 `AGENTS.md`（工作纪律）分家 |
 | `changelog.md` | **历史论证 / 变更史**（按阶段分节、新在上；流水账风格，含被推翻的结论与修订理由） |
 

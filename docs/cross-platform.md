@@ -37,11 +37,7 @@ Windows 上 Ctrl+C 走 `SIGINT`，`SIGTERM` 不会被触发（不需要特判，
 
 ### 3.2 预设：每台机器自备 `CMakeUserPresets.json`
 
-`CMakePresets.json`（tracked）只有 `base` 与 `base_*` 的构建预设；编译器与工具链路径属于**机器本地**信息，放 `CMakeUserPresets.json`（gitignored）。
-
-⚠️ CMake 的硬约束：**两个文件里的 preset 不能重名**，且 `CMakePresets.json` 里的 preset **不能继承** user 文件里的。所以 `dev_*` 这个名字只能由 user 文件给。
-
-示例（Windows）：
+预设的一般约定（tracked 只管公共部分、两份文件不能重名、不能跨文件继承）→ `maintainers.md` §1.2。下面是 Windows 的具体写法。
 
 ```json
 {
