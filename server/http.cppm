@@ -1,6 +1,7 @@
 module;
 
 #include <concepts>
+#include <coroutine>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
