@@ -1,7 +1,7 @@
 file(GLOB_RECURSE ASIO_SOURCES CONFIGURE_DEPENDS *.cpp)
 file(GLOB_RECURSE ASIO_MODULES CONFIGURE_DEPENDS *.cppm)
 
-add_library(asio-module ${ASIO_SOURCES})
+add_library(asio-module STATIC ${ASIO_SOURCES})
 target_sources(asio-module PUBLIC
     FILE_SET asio_set TYPE CXX_MODULES
     BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}"

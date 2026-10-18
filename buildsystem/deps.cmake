@@ -4,14 +4,14 @@
 include(FetchContent)
 FetchContent_Declare(jk
     GIT_REPOSITORY https://github.com/Joker-Principal/jk.git
-    GIT_TAG v2.0.0
+    GIT_TAG v2.1.0
     GIT_SHALLOW TRUE
     FIND_PACKAGE_ARGS CONFIG)
 FetchContent_MakeAvailable(jk)
 find_package(jk CONFIG REQUIRED)
 
 find_package(asio CONFIG REQUIRED)
-find_package(Boost CONFIG REQUIRED COMPONENTS asio context)
+find_package(Boost CONFIG REQUIRED COMPONENTS context)
 find_package(OpenSSL REQUIRED)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
