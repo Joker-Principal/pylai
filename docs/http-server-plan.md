@@ -37,7 +37,7 @@
 |---|---|
 | **可停机维护** | 服务器**允许停机维护与调参**。这条直接决定了 §7 的"离线 / 在线"分工（见 §7.2） |
 | 模块层边界 | `standalone/` **只**做 asio → module 封装；应用另建目录（`AGENTS.md` §1） |
-| 环境 | io_uring 恒定启用（用户倾向不做运行期开关）；构建与工具纪律见 `AGENTS.md` |
+| 环境 | 平台后端由构建决定：Linux 恒用 io_uring（不做运行期开关）；Windows / macOS 用 asio 默认（IOCP / kqueue）—— 见 `docs/cross-platform.md`。构建与工具纪律见 `AGENTS.md` |
 
 ### 1.3 质量底线：三个“不亏欠”
 

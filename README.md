@@ -17,6 +17,17 @@ HTTP 服务器框架（`server/`，静态库 **`pylai`**）；底座是 `standal
 
 工作区**之外**但要经常查的目录（vcpkg 根等）→ `docs/vcpkg.md`。
 
+## 平台
+
+| 平台 | asio 后端 | 状态 |
+|---|---|---|
+| Linux（含 WSL2） | **io_uring** | ✅ 日常验证（构建 + 端到端） |
+| Windows | **IOCP**（MSVC 14.34+ / VS 2022 17.4+） | 🔍 构建已按平台分叉，未真机验证 |
+| macOS | **kqueue** | 🔍 未验证 |
+
+平台差异**只在 CMake 与 `vcpkg.json` 里分叉**，`server/` 不写 `#ifdef`。
+构建步骤与已知风险 → `docs/cross-platform.md`。
+
 ## 三类文档，分工明确
 
 | 类型 | 去哪 | 性质 |
@@ -32,6 +43,12 @@ HTTP 服务器框架（`server/`，静态库 **`pylai`**）；底座是 `standal
 ```
 cmake --preset dev_llvm
 cmake --build --preset debug_llvm
+```
+
+验证（起服务器 → 发请求断言；跨平台，Windows 上同样用它）：
+
+```
+python tests/run.py
 ```
 
 也可以用 CMake Tools 触发配置 / 构建（状态栏按钮，或命令 `cmake.configure` / `cmake.build`）。

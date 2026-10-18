@@ -1,13 +1,20 @@
 """端到端验证：对真 Server 发原始 HTTP 请求，检查解析 / 路由 / 应答是否符合预期。
 
 用裸 socket 而不是 curl：curl 会读取环境变量，请求可能不按预期直连。
-用法：./tests/run.sh（一条龙）；或先起 build-dev_llvm/tests/Debug/app，再 python3 tests/http_e2e.py
+用法：python tests/run.py（一条龙，跨平台）；或先起产物，再 python tests/http_e2e.py
+地址与端口由 PYLAI_E2E_HOST / PYLAI_E2E_PORT 指定，默认 127.0.0.1:18080。
 """
 
+import os
 import socket
 import sys
 
-HOST, PORT = "127.0.0.1", 18080
+# Windows 控制台默认不是 UTF-8 ⇒ 断言里的中文会乱码或直接抛 UnicodeEncodeError
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+HOST = os.environ.get("PYLAI_E2E_HOST", "127.0.0.1")
+PORT = int(os.environ.get("PYLAI_E2E_PORT", "18080"))
 
 
 def request(method, target, body=b"", chunked=False):

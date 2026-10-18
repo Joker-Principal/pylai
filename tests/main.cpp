@@ -1,7 +1,9 @@
 #include <array>
 #include <coroutine>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <exception>
 #include <span>
 #include <string>
@@ -119,13 +121,26 @@ asio::awaitable<void> App::count_body(Post<"/count"> req, pylai::route::StringRe
 
 } // namespace
 
-int main()
+int main(int argc, char** argv)
 {
 	try
 	{
+		// 端口可由命令行覆盖（`app 18080`）：端到端入口要换端口时不必改源码
+		auto port = std::uint16_t{18080};
+		if(argc > 1)
+		{
+			const auto parsed = std::strtoul(argv[1], nullptr, 10);
+			if(parsed == 0 || parsed > 65535)
+			{
+				fmt::print(stderr, "app: 端口不合法：{}\n", argv[1]);
+				return 2;
+			}
+			port = static_cast<std::uint16_t>(parsed);
+		}
+
 		App app; // 必须比 server 活得久：路由里存的是 &app
 		auto server = pylai::Server::builder()
-		                  .bind("127.0.0.1", 18080)
+		                  .bind("127.0.0.1", port)
 			                  .max_body_bytes(1024) // 让 e2e 用 1 KiB 就能试到 413
 			                  .route_on(&app, &App::health, &App::user, &App::submit, &App::list_items,
 			                            &App::create_item, &App::both, &App::both_head, &App::echo_body, &App::peek_body,

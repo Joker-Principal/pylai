@@ -62,7 +62,7 @@ int main()
 }
 ```
 
-能跑的版本是 `tests/main.cpp`；跑它：`cmake --build --preset debug_llvm && ./tests/run.sh`。
+能跑的版本是 `tests/main.cpp`；跑它：`cmake --build --preset debug_llvm && python tests/run.py`。
 
 `Builder` 上就这些可调项：`bind` · `io_threads`（默认 1）· `idle_timeout` · `write_timeout` ·
 `max_requests_per_connection`（默认 1000）· `max_body_bytes`（默认 1 MiB，超了 413 + 关连接）·
@@ -256,7 +256,8 @@ co_await res.status(201).content_type("application/json").header("X-Trace", "abc
 ## 当前状态（🟡 Stage 1：框架形态定形，进行中）
 
 已有：llhttp 解析（pipeline / 半包 / 400 / 431）、keep-alive、空闲与写超时、
-每连接独立 `cancellation_signal`、SIGINT/SIGTERM 优雅停机、io_uring 后端、
+每连接独立 `cancellation_signal`、优雅停机（`SIGINT`；`SIGTERM` 仅 POSIX）、
+后端随平台（Linux io_uring / Windows IOCP —— 见 `docs/cross-platform.md`）、
 **声明式路由**（DSL 全表见上文「怎么用」§3）。
 
 刻意**尚无**（按计划分层顺序逐步加）：
@@ -277,7 +278,7 @@ cmake --build --preset debug_llvm    # 产出 server/Debug/libpylai.a
 把框架跑起来（示例应用 + 端到端断言）→ 见 `tests/README.md`：
 
 ```
-./tests/run.sh
+python tests/run.py                  # 跨平台，唯一入口
 ```
 
 ## 用 clice 查路由设施

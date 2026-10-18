@@ -39,13 +39,22 @@ find_package(asio CONFIG REQUIRED)
 find_package(Boost CONFIG REQUIRED COMPONENTS asio context)
 find_package(OpenSSL REQUIRED)
 
-# liburing ships only a pkg-config file (no CMake config package), so consume it
-# through PkgConfig. vcpkg does not export PKG_CONFIG_PATH, so point pkg-config at
-# the installed triplet's pkgconfig directory (prepended to any existing value).
-find_package(PkgConfig REQUIRED)
-set(ENV{PKG_CONFIG_PATH}
-    "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/lib/pkgconfig:$ENV{PKG_CONFIG_PATH}")
-pkg_check_modules(liburing REQUIRED IMPORTED_TARGET liburing)
+# 平台差异只在构建这一层分叉，代码里不写 `#ifdef`（见 docs/cross-platform.md）。
+# Linux 才有 io_uring：liburing 只发 pkg-config（没有 CMake config 包），
+# 且 vcpkg 不导出 PKG_CONFIG_PATH ⇒ 自己把 triplet 的 pkgconfig 目录指过去。
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    find_package(PkgConfig REQUIRED)
+    set(ENV{PKG_CONFIG_PATH}
+        "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/lib/pkgconfig:$ENV{PKG_CONFIG_PATH}")
+    pkg_check_modules(liburing REQUIRED IMPORTED_TARGET liburing)
+endif()
+
+# MSVC：源码注释是 UTF-8 且含中文 ⇒ 必须 /utf-8，否则按系统代码页解析；
+# /Zc:preprocessor 是 C++20 modules 与 __VA_OPT__ 的前提（与 jk 自身 target 的要求一致）。
+# 放在 FetchContent 之后，免得把这些选项塞进 jk。
+if(MSVC)
+    add_compile_options(/utf-8 /permissive- /Zc:preprocessor)
+endif()
 
 add_subdirectory(standalone)
 add_subdirectory(server)

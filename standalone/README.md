@@ -13,8 +13,10 @@
   - `asio.cpp` → `<asio/impl/src.hpp>`
   - `asio/ssl.cpp` → `<asio/ssl/impl/src.hpp>`
   - `asio/experimental.cpp` → experimental 的 `.ipp`
-- **`CMakeLists.txt`**：负责链接（`asio::asio`、`Boost::context`、OpenSSL、`PkgConfig::liburing`）
-  与编译宏（`ASIO_SEPARATE_COMPILATION` / `ASIO_NO_DEPRECATED` / `ASIO_HAS_IO_URING[_AS_DEFAULT]`）
+- **`CMakeLists.txt`**：负责链接（`asio::asio`、`Boost::context`、OpenSSL、**按平台的后端库**）
+  与编译宏（`ASIO_SEPARATE_COMPILATION` / `ASIO_NO_DEPRECATED`；Linux 另加 `ASIO_HAS_IO_URING[_AS_DEFAULT]`）
+- **后端随平台**：Linux → `PkgConfig::liburing`（io_uring）；Windows → `ws2_32` / `mswsock`（IOCP）；macOS → 无（kqueue）。
+  清单与判据见 `docs/cross-platform.md`
 - 新增 asio 的 standalone 头文件不需要改 CMake：`GLOB_RECURSE *.cpp / *.cppm` 会自动纳入
 
 ## 什么**不该**放这里

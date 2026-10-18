@@ -20,6 +20,17 @@
 
 ## 阶段 1 · 框架形态定形
 
+- **2026-10-18 · S1-R15 · 跨平台：Linux io_uring / Windows IOCP（构建层单点分叉）** ✅ —— 用户：“**需要添加 Windows 支持**”。
+  **事实先行**：`server/`、`standalone/` 的实现里**没有** POSIX 头、`SO_REUSEPORT`、`_WIN32` 分支（`grep -rn 'unistd|sys/|arpa/|netinet/|SO_REUSEPORT|_WIN32' server standalone` 零命中）⇒ 不可移植的只有构建配置与测试入口。
+  **三处分叉**（代码零改动）：① 根 `CMakeLists.txt` 把 `PkgConfig` + liburing 收进 `if(CMAKE_SYSTEM_NAME STREQUAL "Linux")`，并给 MSVC 加 `/utf-8`（源码注释含中文 UTF-8）与 `/Zc:preprocessor`（modules 前提）；② `standalone/CMakeLists.txt` 按平台拼 `ASIO_PLATFORM_LIBS`（Linux → `PkgConfig::liburing`，Windows → `ws2_32 mswsock`），`ASIO_HAS_IO_URING[_AS_DEFAULT]` 只在 Linux 定义；③ `vcpkg.json` 的 `liburing` 加 `"platform": "linux"` —— 该端口自带 `"supports": "linux"`，不门控会让 Windows 上的 configure 直接失败。
+  **为什么 Windows 不需要 asio 宏**：asio 自带后端选择（Windows = IOCP、macOS = kqueue）；我们原来无条件定义的 `ASIO_HAS_IO_URING*` 是“Linux 上恒定启用后端”的选择（用户此前定：不做运行期开关），只对 Linux 有意义。
+  **测试入口跨平台化**：新增 `tests/run.py`（找产物 → 查 端口 → 起服务器 → 跑 `http_e2e.py` → 收工），**删除 `tests/run.sh`**（用户定：只用 python，不留第二套入口）；`http_e2e.py` 的地址/端口改由 `PYLAI_E2E_HOST` / `PYLAI_E2E_PORT` 注入并把 stdout 切到 UTF-8（Windows 控制台默认不是）。示例应用 `tests/main.cpp` 接受命令行端口（`app 18080`），换端口不用改源码。
+  **踩到的坑（已修）**：`run.py` 最初用 `bind()` 探测端口空不空 —— 服务端（asio）默认开 `SO_REUSEADDR`，而刚关掉的连接会留在 `TIME_WAIT`，于是把“能起来”误判成“被占用”（实测复现一次：`python tests/run.py` 报端口占用但 `ss -ltn` 与 `pgrep` 都是空）。改成 `connect()` 探测“有没有人在 LISTEN”。
+  **文档**：新增 `docs/cross-platform.md`（后端矩阵 · 三处分叉点 · Windows 构建步骤与示例 `CMakeUserPresets.json` · 已知风险）；`README.md` 加「平台」表；`tests/`、`server/`、`standalone/` 的 README 与 `docs/vcpkg.md`、`plan` §1.2、`asio-notes.md` 抬头同步；`AGENTS.md` §3 增一条纪律（平台差异只在 CMake / manifest 分叉，实现里不写 `#ifdef`）。
+  **已知风险（留给真机）**：`route.cppm` 的响应链式 setter 用了 **deducing this**（C++23 显式对象参数）⇒ MSVC 需 17.10+ 且历史上对转发有限制，最可能在 Windows 首次构建时暴露；IOCP 与 io_uring 的取消 / 关闭时序不同，护栏只有 e2e 那 30 条；`SIGTERM` 在 Windows 上不会触发（靠 Ctrl+C 的 `SIGINT`）。
+  验证：`cmake --preset dev_llvm` exit 0、`cmake --build --preset debug_llvm` 通过；`python tests/run.py` 跑多遍（含 `--port 19091`、以及删掉 `run.sh` 后）→ **ALL PASS（30 条）**、退出码 0。
+  **未验证**：Windows / macOS 真机构建 —— 矩阵里仍是 🔍，实测后回来改成 ✅。
+
 - **2026-10-14 · S1-R14 · 全仓文档复查：读者分流 · 路由并入使用手册 · 证据纪律改“符号名”** ✅ —— 用户：“把所有文档都重新检查和整理一遍吧，遇到问题用选项卡告诉我”，四个维度：重复内容 · 章节与交叉引用 · 状态标记 · 示例与 API 一致性（`changelog.md` 作为历史账本除外）。
   **读者分流**：`AGENTS.md` §0 给出三类读者入口（只想用它 / 读代码改框架 / 只看接口边界）；§1 不再抄目录地图（以根 `README.md` 为准，免得两处各改各的）。
   **路由并入使用手册**：`docs/routing.md` 的内容并进 `server/README.md`（接入 · 最小可跑 · DSL 全表 · 请求与响应 · 协议层应答 · 观测挂点）后删除 —— 路由是 server 的一部分，不该有两份。

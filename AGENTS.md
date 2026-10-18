@@ -92,6 +92,9 @@
 ### 构建
 
 - `cmake --preset dev_llvm` → `cmake --build --preset debug_llvm`
+- 端到端验证：`python tests/run.py`（跨平台，**唯一入口**；不再有 bash 脚本）。
+- **平台差异只在 CMake / `vcpkg.json` 里分叉**（`if(CMAKE_SYSTEM_NAME …)`、manifest 的 `"platform"`），
+  实现里不写 `#ifdef _WIN32`。清单与 Windows 构建步骤见 `docs/cross-platform.md`。
 - vcpkg 根：`<vcpkg 根>`；工具链配置在 `CMakeUserPresets.json`（gitignored）
 
 ---
@@ -126,7 +129,7 @@
   用户通过才 `git commit`，不要连着自作主张提几个。
 - **格式**：`type(scope): 中文描述`（沿用历史：`feat(server)` / `refactor(server)` / `docs` / `build` / `chore`）。
   **正文不超过 5 行**，只讲"改了什么 + 为什么"；细节留给 `docs/changelog.md`。
-- **提交前跑一遍验证**（§2 证据纪律的落地）：`cmake --build --preset debug_llvm` + `./tests/run.sh`，
+- **提交前跑一遍验证**（§2 证据纪律的落地）：`cmake --build --preset debug_llvm` + `python tests/run.py`，
   退出码写进当轮汇报。构建或测试不过就不提交。
 - **拆分粒度以"能独立成立"为准**，不为凑主题制造编不过的中间态；跨文件强耦合的改动（改结构 + 同步改调用方 + 同步改文档）算**一个**主题。
 - 生成物与本机配置都不进版本库：`.clice/` · `build-*/` · `.vscode/` · `CMakeUserPresets.json` · `clice.toml`（已在 `.gitignore`）。

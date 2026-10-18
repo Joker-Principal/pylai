@@ -11,7 +11,10 @@
             "features": ["spawn", "ssl"]
         },
         "openssl",
-        "liburing",
+        {
+            "name": "liburing",
+            "platform": "linux"
+        },
         "llhttp",
         "fmt",
         "spdlog",
