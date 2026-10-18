@@ -1,0 +1,205 @@
+name: Publish pylai to joker-registry
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要发布的 tag（例如 v0.2.0）"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-pylai-to-joker-registry
+  cancel-in-progress: false
+
+env:
+  PORT: pylai
+  REGISTRY_OWNER: Joker-Principal
+  REGISTRY_REPO: joker-registry
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Resolve tag to commit
+        id: tag
+        env:
+          TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+        run: |
+          set -euo pipefail
+          case "$TAG" in
+            v*) ;;
+            *) echo "::error::tag '$TAG' 必须以 v 开头"; exit 1 ;;
+          esac
+          case "$TAG" in
+            *[!0-9A-Za-z._-]*) echo "::error::tag '$TAG' 含非法字符"; exit 1 ;;
+          esac
+
+          # annotated tag 必须取 ^{} 解包后的 commit
+          refs=$(git ls-remote --tags "https://github.com/${GITHUB_REPOSITORY}.git" \
+                   "refs/tags/${TAG}" "refs/tags/${TAG}^{}")
+          sha=$(printf '%s\n' "$refs" | awk -v t="refs/tags/${TAG}^{}" '$2 == t { print $1 }')
+          [ -n "$sha" ] || sha=$(printf '%s\n' "$refs" | awk -v t="refs/tags/${TAG}" '$2 == t { print $1 }')
+          if ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::tag '$TAG' 解析不出 40 位 commit sha"
+            exit 1
+          fi
+
+          {
+            echo "tag=$TAG"
+            echo "version=${TAG#v}"
+            echo "sha=$sha"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Guard tag immutability
+        env:
+          SHA: ${{ steps.tag.outputs.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          status=$(curl -fsS -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/compare/${SHA}...master" | jq -r .status)
+          case "$status" in
+            behind|identical) ;;
+            *) echo "::error::${SHA} 不在 master 上（compare status=${status}），拒绝发布未合入的 tag"; exit 1 ;;
+          esac
+
+      - name: Compute archive SHA512
+        id: archive
+        env:
+          SHA: ${{ steps.tag.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # 源仓是 public，不需要 Authorization
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/source.tar.gz" \
+            "https://github.com/${GITHUB_REPOSITORY}/archive/${SHA}.tar.gz"
+          echo "sha512=$(sha512sum "$RUNNER_TEMP/source.tar.gz" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout joker-registry
+        uses: actions/checkout@v4
+        with:
+          repository: Joker-Principal/joker-registry
+          ref: master
+          path: registry
+          token: ${{ secrets.JOKER_REGISTRY_AUTO_UPDATE }}
+          fetch-depth: 0
+
+      - name: Update port and commit
+        id: port
+        working-directory: registry
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+          SHA: ${{ steps.tag.outputs.sha }}
+          SHA512: ${{ steps.archive.outputs.sha512 }}
+        run: |
+          set -euo pipefail
+
+          # 同 version+port-version 已发布过：内容一致就跳过；不一致说明 tag 被移动过
+          tree=$(git rev-parse "HEAD:ports/${PORT}")
+          version_file=$(ls versions/*/"${PORT}".json 2>/dev/null | head -n1 || true)
+          if [ -n "$version_file" ]; then
+            released=$(jq -r --arg v "$VERSION" \
+              '.versions[] | select(.version == $v and ((."port-version" // 0) == 0)) | ."git-tree"' \
+              "$version_file" | head -n1)
+            if [ -n "$released" ] && [ "$released" != "$tree" ]; then
+              echo "::error::${PORT} ${VERSION} 已发布（git-tree ${released}），HEAD 端口内容是 ${tree}；tag 被移动过，拒绝覆盖"
+              exit 1
+            fi
+            if [ -n "$released" ]; then
+              echo "::notice::${PORT} ${VERSION} 已发布且内容一致，跳过"
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+
+          python3 - <<'PY'
+          import json, os, re, sys
+          from pathlib import Path
+
+          port = os.environ["PORT"]
+          version = os.environ["VERSION"]
+          sha = os.environ["SHA"]
+          sha512 = os.environ["SHA512"]
+
+          portfile = Path("ports") / port / "portfile.cmake"
+          text = portfile.read_text(encoding="utf-8")
+          for suffix, value in (("REF", sha), ("SHA512", sha512)):
+              pattern = re.compile(rf'^set\(([A-Z0-9_]+_{suffix}) "[^"]*"\)$', re.M)
+              names = pattern.findall(text)
+              if len(names) != 1:
+                  sys.exit(f"ports/{port}/portfile.cmake 中 {suffix} 的 set() 行数为 {len(names)}，应为 1")
+              text = pattern.sub(lambda m: f'set({m.group(1)} "{value}")', text)
+          portfile.write_text(text, encoding="utf-8")
+
+          manifest = Path("ports") / port / "vcpkg.json"
+          mtext = manifest.read_text(encoding="utf-8")
+          mtext, n = re.subn(r'^(\s*)"version": "[^"]*"(,?)$',
+                             rf'\1"version": "{version}"\2', mtext, count=1, flags=re.M)
+          if n != 1:
+              sys.exit(f"ports/{port}/vcpkg.json 中找不到 version 字段")
+          mtext, n = re.subn(r',\s*\n\s*"port-version": \d+', "", mtext, count=1)
+          if n == 0:
+              mtext, n = re.subn(r'"port-version": \d+,?\s*\n\s*', "", mtext, count=1)
+          json.loads(mtext)
+          manifest.write_text(mtext, encoding="utf-8")
+          PY
+
+          if git diff --quiet -- "ports/${PORT}"; then
+            echo "::notice::ports/${PORT} 无改动"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git add "ports/${PORT}"
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -m "ports: ${PORT} ${VERSION}"
+
+      - name: Regenerate version database
+        if: steps.port.outputs.skip != 'true'
+        working-directory: registry
+        run: |
+          set -euo pipefail
+          vcpkg_bin="${VCPKG_INSTALLATION_ROOT}/vcpkg"
+          if [ ! -x "$vcpkg_bin" ]; then
+            git clone --depth 1 https://github.com/microsoft/vcpkg.git "$RUNNER_TEMP/vcpkg"
+            "$RUNNER_TEMP/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+            vcpkg_bin="$RUNNER_TEMP/vcpkg/vcpkg"
+          fi
+          "$vcpkg_bin" x-add-version \
+            --x-builtin-ports-root=./ports \
+            --x-builtin-registry-versions-dir=./versions \
+            "$PORT"
+
+      - name: Commit versions and push
+        if: steps.port.outputs.skip != 'true'
+        working-directory: registry
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          if ! git diff --quiet -- versions; then
+            git add versions
+            git -c user.name="github-actions[bot]" \
+                -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+                commit -m "versions: ${PORT} ${VERSION}"
+          fi
+
+          # pylai/jk 两个仓的 concurrency 组不共享，可能同时写 registry：push 失败就 rebase 重试
+          for attempt in 1 2 3 4 5; do
+            git pull --rebase origin master
+            if git push origin HEAD:master; then
+              echo "::notice::已推送 joker-registry@master（${PORT} ${VERSION}）"
+              exit 0
+            fi
+            echo "::warning::第 ${attempt} 次 push 失败，重试"
+          done
+          echo "::error::连续 push 失败"
+          exit 1
