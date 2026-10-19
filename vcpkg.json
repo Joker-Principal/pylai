@@ -1,11 +1,11 @@
 {
     "name": "pylai",
-    "version": "0.1.4",
+    "version": "0.1.5",
     "dependencies": [
         "jk",
         {
             "name": "asio",
-            "features": ["spawn", "ssl"]
+            "features": ["spawn"]
         },
         {
             "name": "liburing",
