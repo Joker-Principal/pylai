@@ -1,5 +1,4 @@
 module;
-
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -8,9 +7,10 @@ module;
 #include <plf_hive.h>
 #include <string>
 
+#include <asio.hpp>
+
 export module pylai:server;
 
-import asio;
 import :config;
 import :http;
 import :route;

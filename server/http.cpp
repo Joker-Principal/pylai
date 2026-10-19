@@ -1,5 +1,4 @@
 module;
-
 #include <algorithm>
 #include <array>
 #include <coroutine>
@@ -19,6 +18,7 @@ module;
 #include <fmt/format.h>
 #include <fmt/ranges.h>
 #include <llhttp.h>
+#include <asio.hpp>
 
 module pylai;
 

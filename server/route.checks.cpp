@@ -5,7 +5,6 @@
 // `import pylai;` 的公开面 + e2e 全程跑。
 // ⚠️ “必须编不过”的失败路径不在这里 —— 那要靠人工探针（见 docs/http-server-plan.md §11.2）。
 module;
-
 #include <array>
 #include <coroutine>
 #include <cstddef>
@@ -15,9 +14,10 @@ module;
 #include <typeinfo>
 #include <vector>
 
+#include <asio.hpp>
+
 module pylai;
 
-import asio; // DSL 里的 handler 返回 asio::awaitable<void>
 import :http;
 import :route;
 
@@ -118,17 +118,9 @@ static_assert(Request<Verb::get, "/users/{id}/posts/{pid}">::slot_of("pid") == 1
 // 没这个名字 → 返回 `params().size()`（越界；`param()` 正是拿它拦错的）
 static_assert(Request<Verb::post, "/submit/{id}">::slot_of("nope") == Pattern<"/submit/{id}">{}.params().size());
 
-// `param<T, "名字">()` 本体（常量求值）：下标 → 捕获 → 转换，整数与 string_view 两条路
-inline constexpr std::array<Capture, 1> one_capture{{{"id", "42"}}};
-inline constexpr std::array<Capture, 1> not_a_number{{{"id", "abc"}}};
-inline constexpr pylai::http::Request raw_request{};
-inline constexpr Request<Verb::post, "/submit/{id}"> submit_req{raw_request, one_capture};
-
-static_assert(submit_req.param<int, "id">() == 42);
-static_assert(submit_req.param<std::string_view, "id">() == "42");
-
-// 转换失败 → 与旧的位置注入**同语义**：静默给 0（不是 400，缺口见 docs/http-server-plan.md §11.2 D）
-static_assert(Request<Verb::post, "/submit/{id}">{raw_request, not_a_number}.param<int, "id">() == 0);
+// `param<T, "名字">()` 本体**不在编译期验**：`Request` 持有指向运行期报文数据的引用 / span，
+// 不是字面量类型，无法常量求值。行为由 `tests/` 的端到端用例覆盖：
+// `/users/{id}` 同时走 int 与 string_view 两条路，`/users/abc` 验转换失败静默给 0。
 
 // 换用 jk 的 `Callable` 白拿的能力：cv / noexcept 形式的成员指针也能当路由声明
 // （旧的手写偏特化只匹配 `R (C::*)(Ps...)` —— 反证见 `.vscode/tmp/jk-callable-probe/old-trait.cpp`）。

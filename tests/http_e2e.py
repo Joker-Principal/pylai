@@ -52,13 +52,13 @@ def split_body(raw):
 # 断言都带 \r\n 收尾，免得 "Allow: GET, HEAD" 命中 "Allow: GET, HEAD, POST"。
 CASES = [
     ("GET", "/health", b"", 200, "ok", False),
-    ("GET", "/users/42", b"", 200, "user id=42", False),          # req.param<int,"id">()
+    ("GET", "/users/42", b"", 200, "user id=42 text=42", False),      # req.param<int,"id">() + req.param<string_view,"id">()
     ("POST", "/submit/7", b"x=1", 200, "submitted id=7", False),  # 同一组树里另一个动词（且不读体 ⇒ 会 Connection: close）
     ("GET", "/items", b"", 200, "items", False),                  # 同路径两个动词：GET 走 GET 那棵
     ("POST", "/items", b"", 200, "created", False),               # 同路径两个动词：POST 走 POST 那棵
     ("GET", "/nope", b"", 404, "404", False),                     # 路径不在
     ("GET", "/echo", b"", 404, "404", False),                     # 旧字符串 API 已移除 → 不再有这条路由
-    ("GET", "/users/abc", b"", 200, "user id=0", False),          # 🔍 已知缺口：from_chars 失败静默给 0
+    ("GET", "/users/abc", b"", 200, "user id=0 text=abc", False),   # 🔍 已知缺口：from_chars 失败静默给 0
 
     # 405 带 Allow；路径上有 GET 时隐含带出 HEAD（RFC 9110 §9.3.2）
     ("POST", "/health", b"", 405, "Allow: GET, HEAD\r\n", False),

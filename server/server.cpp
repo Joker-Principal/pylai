@@ -1,5 +1,4 @@
 module;
-
 #include <coroutine>
 #include <cassert>
 #include <csignal>
@@ -11,10 +10,10 @@ module;
 #include <vector>
 
 #include <spdlog/spdlog.h>
+#include <asio.hpp>
 
 module pylai;
 
-import asio;
 import :config;
 import :http;
 import :log;

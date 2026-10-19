@@ -10,8 +10,8 @@
 #include <vector>
 
 #include <fmt/format.h>
+#include <asio.hpp>
 
-import asio; // handler 返回 asio::awaitable<void> ⇒ 消费方自己 import asio（框架不 export import 它）
 import pylai;
 
 namespace {
@@ -54,7 +54,12 @@ asio::awaitable<void> App::health(Get<"/health">, pylai::route::StringResponse& 
 
 asio::awaitable<void> App::user(Get<"/users/{id}"> req, pylai::route::StringResponse& res)
 {
-	co_await res.body(fmt::format("user id={}\n", req.param<int, "id">())).flush();
+	// `param<>` 的两条转换路径都在运行期验（`Request` 无法在编译期构造，见 route.checks.cpp 的说明）
+	co_await res
+		.body(fmt::format(
+			"user id={} text={}\n", req.param<int, "id">(), req.param<std::string_view, "id">()
+		))
+		.flush();
 }
 
 asio::awaitable<void> App::submit(Post<"/submit/{id}"> req, pylai::route::StringResponse& res)

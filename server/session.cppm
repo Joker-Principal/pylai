@@ -1,5 +1,4 @@
 module;
-
 #include <array>
 #include <cstddef>
 #include <span>
@@ -7,9 +6,10 @@ module;
 #include <string_view>
 #include <system_error>
 
+#include <asio.hpp>
+
 export module pylai:session;
 
-import asio;
 import :config;
 import :http;
 import :route;

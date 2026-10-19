@@ -1,5 +1,4 @@
 module;
-
 #include <concepts>
 #include <coroutine>
 #include <cstddef>
@@ -15,9 +14,9 @@ module;
 #include <type_traits>
 #include <vector>
 
-export module pylai:http;
+#include <asio.hpp>
 
-import asio; // Request 的读体接口是协程（⇒ DAG 新增一条边，见 docs/modules.md）
+export module pylai:http;
 
 export namespace pylai::http {
 
