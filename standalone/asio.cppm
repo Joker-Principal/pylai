@@ -26,6 +26,11 @@ export namespace asio {
     using asio::query_result;
     using asio::require_result;
     using asio::require_concept_result;
+    using asio::config_service;
+    using asio::config;
+    using asio::config_from_concurrency_hint;
+    using asio::config_from_string;
+    using asio::config_from_env;
 
     // Core classes / templates / aliases
     using asio::any_completion_executor;
@@ -146,7 +151,9 @@ export namespace asio {
     using asio::mutable_buffer;
     using asio::const_registered_buffer;
     using asio::mutable_registered_buffer;
+#if !defined(ASIO_NO_DEPRECATED)
     using asio::null_buffers;
+#endif
     using asio::registered_buffer_id;
     using asio::basic_streambuf;
     using asio::buffer_registration;
@@ -360,9 +367,13 @@ export namespace asio {
 
     namespace error {
         using asio::error::basic_errors;
+        using enum asio::error::basic_errors;
         using asio::error::netdb_errors;
+        using enum asio::error::netdb_errors;
         using asio::error::addrinfo_errors;
+        using enum asio::error::addrinfo_errors;
         using asio::error::misc_errors;
+        using enum asio::error::misc_errors;
         using asio::error::make_error_code;
     }
 
@@ -374,9 +385,15 @@ export namespace asio {
         using asio::placeholders::results;
         using asio::placeholders::signal_number;
     }
+
+    namespace detail {
+        using asio::detail::noncopyable;
+        using asio::detail::service_id;
+        using asio::detail::execution_context_service_base;
+    }
 }
 
-namespace std {
+export namespace std {
     using std::coroutine_traits;
 }
 
