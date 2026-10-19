@@ -3,7 +3,7 @@
 include(CMakeFindDependencyMacro)
 
 find_dependency(asio CONFIG)
-find_dependency(Boost CONFIG COMPONENTS asio context)
+find_dependency(Boost CONFIG COMPONENTS context)
 find_dependency(jk CONFIG)
 find_dependency(llhttp CONFIG)
 find_dependency(fmt CONFIG)
