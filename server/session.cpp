@@ -15,7 +15,6 @@ module;
 
 #include <spdlog/spdlog.h>
 #include <fmt/format.h>
-#include <asio.hpp>
 #include <asio/experimental/awaitable_operators.hpp>
 
 module pylai;

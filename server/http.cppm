@@ -14,9 +14,8 @@ module;
 #include <type_traits>
 #include <vector>
 
-#include <asio.hpp>
-
 export module pylai:http;
+export import asio;
 
 export namespace pylai::http {
 

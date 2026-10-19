@@ -15,7 +15,6 @@ target_link_libraries(pylai
         joker::module
         fmt::fmt
         spdlog::spdlog
-    PRIVATE
         llhttp::llhttp_static
 )
 
@@ -24,6 +23,7 @@ option(PYLAI_ENABLE_OBSERVATION "编译进观测钩子与每请求观测槽" ON)
 target_compile_definitions(pylai PUBLIC 
     PYLAI_ENABLE_OBSERVATION=$<BOOL:${PYLAI_ENABLE_OBSERVATION}>
     ASIO_NO_DEPRECATED=1
+    ASIO_SEPARATE_COMPILATION=1
     $<$<PLATFORM_ID:Linux>:ASIO_HAS_IO_URING=1>
     $<$<PLATFORM_ID:Linux>:ASIO_HAS_IO_URING_AS_DEFAULT=1>
     $<$<PLATFORM_ID:Windows>:_WIN32_WINNT=0x0A00>

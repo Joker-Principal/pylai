@@ -16,7 +16,6 @@ module;
 #include <type_traits>
 #include <utility>
 #include <vector>
-#include <asio.hpp>
 
 export module pylai:route;
 

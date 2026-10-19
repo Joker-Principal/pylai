@@ -10,7 +10,6 @@ module;
 #include <vector>
 
 #include <spdlog/spdlog.h>
-#include <asio.hpp>
 
 module pylai;
 

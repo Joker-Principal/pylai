@@ -14,8 +14,6 @@ module;
 #include <typeinfo>
 #include <vector>
 
-#include <asio.hpp>
-
 module pylai;
 
 import :http;

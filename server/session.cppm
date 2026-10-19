@@ -6,8 +6,6 @@ module;
 #include <string_view>
 #include <system_error>
 
-#include <asio.hpp>
-
 export module pylai:session;
 
 import :config;

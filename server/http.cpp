@@ -18,10 +18,10 @@ module;
 #include <fmt/format.h>
 #include <fmt/ranges.h>
 #include <llhttp.h>
-#include <asio.hpp>
 
 module pylai;
 
+import asio;
 import :http;
 
 namespace pylai::http {

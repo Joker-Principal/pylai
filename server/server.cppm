@@ -7,8 +7,6 @@ module;
 #include <plf_hive.h>
 #include <string>
 
-#include <asio.hpp>
-
 export module pylai:server;
 
 import :config;

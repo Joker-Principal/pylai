@@ -5,7 +5,6 @@
 #include <new>
 #include <tuple>
 #include <typeinfo>
-#include <asio.hpp>
 
 import pylai;
 
