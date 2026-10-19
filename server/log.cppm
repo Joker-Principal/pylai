@@ -12,7 +12,7 @@ module;
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 
-export module pylai.log;
+export module pylai:log;
 
 export namespace pylai::log {
 
