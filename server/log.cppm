@@ -5,10 +5,14 @@ module;
 #include <string_view>
 #include <type_traits>
 #include <utility>
+#include <chrono>
+#include <memory>
+#include <utility>
 
 #include <spdlog/spdlog.h>
+#include <spdlog/sinks/stdout_color_sinks.h>
 
-export module pylai:log;
+export module pylai.log;
 
 export namespace pylai::log {
 
@@ -75,7 +79,16 @@ template<typename... Args>
 void critical(const Format<Args...>& fmt, Args&&... args)
 { detail::log_at<spdlog::level::critical>(fmt, std::forward<Args>(args)...); }
 
-// 配置默认 logger（pattern / 级别 / flush 策略）。
-void init();
+void init()
+{
+	auto sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+	auto logger = std::make_shared<spdlog::logger>("pylai", std::move(sink));
+
+	logger->set_pattern("[%m-%d %H:%M:%S.%e][%^%l%$][%s:%#] %v");
+	logger->set_level(spdlog::level::trace);
+	logger->flush_on(spdlog::level::trace);
+
+	spdlog::set_default_logger(std::move(logger));
+}
 
 } // namespace pylai::log
