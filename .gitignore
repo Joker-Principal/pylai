@@ -6,3 +6,4 @@ CMakeUserPresets.json
 clice.toml
 .clice/
 .venv/
+vcpkg-configuration.json

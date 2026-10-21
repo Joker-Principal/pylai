@@ -6,14 +6,13 @@ if(NOT DEFINED CACHE{VCPKG_TARGET_TRIPLET})
     include(FetchContent)
     FetchContent_Declare(jk
         GIT_REPOSITORY https://github.com/Joker-Principal/jk.git
-        GIT_TAG v2.1.0
+        GIT_TAG v2.5.1
         GIT_SHALLOW TRUE
         FIND_PACKAGE_ARGS CONFIG)
     FetchContent_MakeAvailable(jk)
 endif()
 find_package(jk CONFIG REQUIRED)
 
-find_package(Boost CONFIG REQUIRED COMPONENTS context)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     find_package(PkgConfig REQUIRED)
     set(ENV{PKG_CONFIG_PATH}

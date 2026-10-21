@@ -23,6 +23,7 @@ install(EXPORT pylaiTargets
     FILE pylaiTargets.cmake
     NAMESPACE pylai::
     DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/pylai"
+    EXPORT_PACKAGE_DEPENDENCIES
 )
 
 write_basic_package_version_file(

@@ -2,15 +2,15 @@
     "name": "pylai",
     "version": "0.1.6",
     "dependencies": [
-        "jk",
         {
-            "name": "asio",
-            "features": ["spawn"]
+            "name": "jk",
+            "features": ["log"]
         },
         {
             "name": "liburing",
             "platform": "linux"
         },
+        "asio",
         "llhttp",
         "fmt",
         "spdlog",

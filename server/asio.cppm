@@ -1,8 +1,5 @@
 module;
 #include <asio.hpp>
-#if defined(ASIO_HAS_BOOST_CONTEXT_FIBER)
-#include <asio/spawn.hpp>
-#endif
 
 export module asio;
 
@@ -53,7 +50,6 @@ export namespace asio {
     using asio::static_thread_pool;
     using asio::system_context;
     using asio::system_executor;
-    using asio::yield_context;
     using asio::thread;
 
     using asio::any_completion_handler;
@@ -67,7 +63,6 @@ export namespace asio {
     using asio::basic_io_object;
 #endif
     using asio::basic_system_executor;
-    using asio::basic_yield_context;
     using asio::cancel_after_t;
     using asio::cancel_at_t;
     using asio::cancellation_filter;
@@ -120,7 +115,6 @@ export namespace asio {
     using asio::post;
     using asio::prepend;
     using asio::redirect_error;
-    using asio::spawn;
     using asio::throw_exception;
     using asio::to_exception_ptr;
 
