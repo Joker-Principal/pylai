@@ -1,6 +1,5 @@
 {
     "name": "pylai",
-    "version": "0.1.6",
     "dependencies": [
         {
             "name": "jk",
