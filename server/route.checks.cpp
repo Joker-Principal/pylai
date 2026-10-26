@@ -9,6 +9,7 @@ module;
 #include <coroutine>
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <string_view>
 #include <type_traits>
 #include <typeinfo>
@@ -152,6 +153,18 @@ inline void instantiate_chain()
 }
 
 } // namespace dsl_selftest
+
+// 定长可分流式响应：`IsResponse` 只要求 attach + finish ⇒ 达标；链式 setter 也走一遍编译。
+static_assert(IsResponse<ByteResponse>);
+
+namespace byte_response_selftest {
+
+inline void configure(ByteResponse& res)
+{
+	res.length(3).body(std::as_bytes(std::span{"abc"})).header("X-Test", "1");
+}
+
+} // namespace byte_response_selftest
 
 // —— 错误路径：以下每一条都必须被拦下 ——
 static_assert(Pattern<"/a/{x...}/b">{}.err == ParseError::catch_all_not_last);

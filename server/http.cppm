@@ -310,6 +310,8 @@ public:
 	std::vector<Header> headers;
 	std::vector<std::string> trailer_names; // 预告尾部要补哪些字段（只对 chunked 有意义）
 	std::vector<std::byte> pending;		   // 攒着还没出网的体
+	std::optional<std::uint64_t> declared_length; // 定长响应的总长（`ByteResponse` 声明；空 = 未声明）
+	std::uint64_t sent_bytes{0};				  // 已经出网的体字节数（定长响应用它校验够不够）
 	Stage stage{Stage::config};
 
 public:
@@ -321,6 +323,8 @@ public:
 		headers.clear();
 		trailer_names.clear();
 		pending.clear();
+		declared_length.reset();
+		sent_bytes = 0;
 		stage = Stage::config;
 	}
 };

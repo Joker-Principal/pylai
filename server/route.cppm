@@ -1096,6 +1096,47 @@ public:
 	asio::awaitable<std::error_code> finish(std::span<const http::Header> trailers = {});
 };
 
+// 定长、可分块：长度**由调用方声明**（运行期值），体可以反复追加、反复 `flush()`。
+// 与 `StringResponse` 的分工：那个是文本、一次成型（长度 = 攒下的字节数）；
+// 这个是字节、长度先知道、内容边产边发（代理透传 / 大文件 / 导出流）。
+// ⚠️ 长度由调用方保证：多写立刻抛，少写在 `finish()` 抛 —— `Content-Length` 一发出就补不回来，
+//   定长写不够属于协议错误，只能让连接层断开。
+export struct ByteResponse : ResponseCore
+{
+public:
+	// 声明总长（决定 `Content-Length`）。只能在发头之前调，且只能调一次。
+	template <typename Self>
+	auto&& length(this Self&& self, std::uint64_t n)
+	{
+		self.require_config("length");
+		auto& s = self.state();
+		if(s.declared_length) http::throw_out_of_order("length");
+		s.declared_length = n;
+		return std::forward<Self>(self);
+	}
+
+	// 追加一段体（可反复；`flush()` 之后仍可继续追加）。
+	template <typename Self>
+	auto&& body(this Self&& self, std::span<const std::byte> data)
+	{
+		auto& s = self.state();
+		if(s.stage == http::Stage::finished) http::throw_out_of_order("body");
+		if(!s.declared_length) throw std::logic_error{"body：先调 length() 声明总长"};
+		if(s.sent_bytes + s.pending.size() + data.size() > *s.declared_length)
+			throw std::logic_error{"body：体超过声明过的长度"};
+		s.pending.insert(s.pending.end(), data.begin(), data.end());
+		return std::forward<Self>(self);
+	}
+
+public:
+	void apply_defaults() noexcept { state().content_type = "application/octet-stream"; }
+
+	// flush：头没发就先发头（按声明的长度），然后把攒着的字节写出去（HEAD 只发头）。
+	asio::awaitable<std::error_code> flush();
+	// 收尾：flush + 校验已写字节数 == 声明的长度（幂等）。
+	asio::awaitable<std::error_code> finish();
+};
+
 // 响应类型的判据（`make_arg` 据此区分“请求形参”与“响应形参”）：
 // 框架要能给它注入 Context + 写通道、能兜底收尾。
 export template <typename T>

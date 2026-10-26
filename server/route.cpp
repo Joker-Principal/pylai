@@ -207,4 +207,48 @@ asio::awaitable<std::error_code> UnknownLengthResponse::finish(std::span<const h
 	co_return ec;
 }
 
+asio::awaitable<std::error_code> ByteResponse::flush()
+{
+	auto& s = state();
+	if(s.stage == http::Stage::finished) co_return std::error_code{};
+	require_writer();
+	if(!s.declared_length) throw std::logic_error{"ByteResponse：flush 之前要先调 length() 声明总长"};
+
+	if(s.stage == http::Stage::config)
+	{
+		const auto ec = co_await send_head(*s.declared_length, false);
+		if(ec) co_return ec;
+	}
+
+	// HEAD 照发头（`Content-Length` 按声明值），正文抑制。
+	if(out_->head_only() || s.pending.empty()) co_return std::error_code{};
+
+	const auto ec = co_await out_->write(s.pending);
+	if(ec) co_return ec;
+
+	s.sent_bytes += s.pending.size();
+	s.pending.clear();
+	co_return std::error_code{};
+}
+
+asio::awaitable<std::error_code> ByteResponse::finish()
+{
+	auto& s = state();
+	if(s.stage == http::Stage::finished) co_return std::error_code{};
+
+	const auto flushed = co_await flush();
+	if(flushed) co_return flushed;
+
+	if(out_->head_only())
+	{
+		s.stage = http::Stage::finished;
+		co_return std::error_code{};
+	}
+
+	if(s.sent_bytes != *s.declared_length) throw std::logic_error{"ByteResponse：已写字节数与声明过的长度不符"};
+
+	s.stage = http::Stage::finished;
+	co_return std::error_code{};
+}
+
 } // namespace pylai::route
