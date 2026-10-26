@@ -206,6 +206,7 @@ auto server = pylai::Server::builder()
 | `route::StringResponse` | 内存里的字节（`body(块)` 追加） | `Content-Length` | 绝大多数接口 |
 | `route::EmptyResponse` | 无（**没有** `body()`） | 204 / 304 / 1xx：**不发** `Content-Length`；其它状态码发 `Content-Length: 0` | OPTIONS 204、304 |
 | `route::UnknownLengthResponse` | handler 边跑边推（`body(块)` + `flush()`） | **响应侧 chunked** | SSE / 大响应流 |
+| `route::ByteResponse` | 内存里的字节，**可反复 flush**（`body(块)` 追加） | `Content-Length`（**声明值**，`length(n)` 给） | 长度先知道、内容边产边发：代理透传 / 大文件 / 导出流 |
 
 公共部分：`status(int)`（默认 200；`EmptyResponse` 默认 204）· `content_type(名字)` · `header(名字, 值)` · `trailer(名字)`（预告）。
 它们**只改状态**（链式、返回具体类型，可混着链）；**出网只有一个动作** —— `co_await res.flush()`（返回 `std::error_code`，空 = 成功；否则 `http::WriteErrc::closed` / `timed_out`）。
@@ -216,12 +217,14 @@ co_await res.status(201).content_type("application/json").header("X-Trace", "abc
 
 | 动作 | 含义 |
 |---|---|
+| `length(n)` | 声明定长（`ByteResponse` 专用；必须在发头前，只能调一次） |
 | `body(块)` | **只往内存追加**，不碰 socket |
 | `co_await res.flush()` | 把此刻攒着的发出去：头没发就先发头，然后发体（推式就是发一个块）。幂等 |
 | `co_await res.finish(trailers)` | 收尾：flush + 末块 + trailer。handler 不调 ⇒ **框架在它返回后兜底调** |
 
 **推式（`UnknownLengthResponse`）**：`flush()` 推一块，**什么时候推由 handler 定**（这是它存在的理由）；`finish(trailers)` 发终止块 + trailer。
-⚠️ **顺序错会抛 `std::logic_error`**：头一出去，`status` / `content_type` / `header` / `trailer` 就不能再改；定长响应 flush 之后也不能再 `body()`。
+**定长可分流式（`ByteResponse`）**：先 `length(n)`，之后 `body(块)` + `co_await res.flush()` 可以反复；`finish()` 校验已写字节数等于声明值 —— 多写 / 少写都抛 `std::logic_error`（`Content-Length` 已发出就补不回来）。
+⚠️ **顺序错会抛 `std::logic_error`**：头一出去，`status` / `content_type` / `header` / `trailer` 就不能再改；`StringResponse` flush 之后也不能再 `body()`（`ByteResponse` 可以，它就是为这个来的）。
 ⚠️ **`co_await res` 这种写法不存在** —— asio 的 promise 有 `await_transform`，它**优先于** `operator co_await`，所以出网只能 `co_await res.flush()` / `finish()`。
 ⚠️ **trailer 只在 chunked 下存在**，且字段必须是其定义允许出现在 trailer 的（`ETag` / `Accept-Ranges` / `Authentication-Info`）；中间设备往往直接丢掉，别放必需信息（RFC 9110 §6.5.1）。
 ⚠️ **HEAD**：头照发（`Content-Length` 按 GET 的体算），正文一个字节也不发。
@@ -248,12 +251,15 @@ co_await res.status(201).content_type("application/json").header("X-Trace", "abc
 - **开关**：`-DPYLAI_ENABLE_OBSERVATION=OFF` 关掉整个观测槽（不占字节、不发分支）。
 - 观测什么、在哪里观测、成本怎么算 → `docs/http-server-plan.md` §4.1.4。
 
-## 当前状态（🟡 Stage 1：框架形态定形，进行中）
+## 当前状态（✅ Stage 1 已收尾，下一步 MU）
 
 已有：llhttp 解析（pipeline / 半包 / 400 / 431）、keep-alive、空闲与写超时、
 每连接独立 `cancellation_signal`、优雅停机（`SIGINT`；`SIGTERM` 仅 POSIX）、
 后端随平台（Linux io_uring / Windows IOCP —— 见 `docs/cross-platform.md`）、
 **声明式路由**（DSL 全表见上文「怎么用」§3）。
+
+MU（拿去 clio 试用）之前还差两条：`Builder` 暴露 `set_observer` ·
+`-DPYLAI_ENABLE_OBSERVATION=OFF` 实测一次（阶段划分见 `docs/http-server-plan.md` §9）。
 
 刻意**尚无**（按计划分层顺序逐步加）：
 

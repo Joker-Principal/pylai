@@ -20,6 +20,17 @@
 
 ## 阶段 1 · 框架形态定形
 
+- **2026-10-27 · S1-R24 · 新增 `ByteResponse`；反代设施的归属成文** 🟡 —— 起点是“HTTP server 的常见用途之一是反代 / 应用网关”。结论按“**框架给设施、不给成品**”收敛，判据与缺口清单见 `docs/proxy.md`。
+  **代码**：`route::ByteResponse` 补上“定长 + 多块”这一格 —— chunked 侧（`UnknownLengthResponse::flush` 每次发一块）本来就能反复 flush，缺的是“长度先知道、内容边产边发”。长度由调用方声明，多写 / 少写 / 未声明都由 `logic_error` 拦（`Content-Length` 一发出就补不回来）。状态仍住 `http::ResponseState`（新增 `declared_length` / `sent_bytes`），不另设一份家。
+  **未验证**：`jk` 2.6.1 的 `log` 特性要求 `spdlog[fmt,tz-offset,wchar]`，而 spdlog 端口的 `wchar` 是 `"supports": "windows"` ⇒ WSL 上 vcpkg 装不上（triplet 改不了 `supports`，得改 `jk` 端口）。构建因此没跑，见提交 `de47cd4`（message 已注明）。
+  **复核**：`grep -rn 'ByteResponse' server/` 能看到声明、出网实现与一条编译期用例（`static_assert(IsResponse<ByteResponse>)`）。
+
+- **2026-10-27 · S1-R23 · 状态口径统一：Stage 1 判为「已收尾」，下一步转 MU 前置两条** ✅ —— 交接简报（`.vscode/tmp/handoff-2026-10-27.md`）与仓库记忆对“Stage 1 完没完”口径不一：简报写 🟡 进行中、手头任务列 io_uring / `liburing` 门控与跨平台 `tests/run.py`。用户裁定**以“已收尾”为准**，本轮只改状态文档、不动代码。
+  **核对（✅ 已查证）**：平台门控早已在构建层 —— `standalone/CMakeLists.txt` 按 `CMAKE_SYSTEM_NAME STREQUAL "Linux"` 拼 `ASIO_PLATFORM_LIBS`，io_uring 两个宏用 `$<PLATFORM_ID:Linux>` 门控；`server/CMakeLists.txt` 另有一份同样的门控（2026-10-27 复核：**不止一处**）；`vcpkg.json` 的 `liburing` 带 `"platform": "linux"`；跨平台入口 `tests/run.py` 已存在（自动搜 `build-*/tests/*/app[.exe]`）。⇒ 简报里那条“手头任务”是过期项。
+  **遗留（属 MU 前置，不算阶段 1 未完成）**：`Builder` 没暴露 `set_observer`（只有 `Router::set_observer`，`server/route.cppm`）；`-DPYLAI_ENABLE_OBSERVATION=OFF` 有 option 与 `#if`，但**没实测过**。
+  **改动面**：`server/README.md`「当前状态」标题（🟡 进行中 → ✅ 已收尾 + 下一步 MU）· `http-server-plan.md` §9 的 Stage 1 / MU 两行。⚠️ 交接简报**不维护**（2026-10-27 用户明确：它只用于进入状态，不改它）—— 原先对它的改动已撤回。`docs/cross-platform.md` 不必动（Windows / macOS 的 🔍 未真机验证仍是事实）。
+  **复核**：`grep -rn "Stage 1" server/README.md docs/http-server-plan.md` 不再出现“进行中”；`grep -n set_observer server/route.cppm` 与 `git grep -n PYLAI_ENABLE_OBSERVATION` 能对上上面两条遗留。
+
 - **2026-10-18 · S1-R22 · 主仓改走 `joker-registry`；删掉 `ports/` 与 `docs/vcpkg.md`** ✅ —— 用户三点：“`ports/` 应该删除，因为完全是 registry 用法了” · “baseline 应该放进 vcpkg-configuration，防止用户的 vcpkg 版本较久导致失败” · “`docs/vcpkg.md` 不需要了，在 maintainers 里解释、在 README 告知用户可用 registry”。
   **配置**：`vcpkg-configuration.json` 的 `overlay-ports` → `registries`（`kind: git` → `https://github.com/Joker-Principal/joker-registry`，`baseline` = `964e6ce`，`packages: [asio, jk]`），并把默认 registry 的 baseline 写进同文件的 `default-registry`（而非 `vcpkg.json` 的 `builtin-baseline`）—— 只声明 `registries` 而不给默认 registry baseline 时 configure 报 `Using registries requires that a baseline is set for the default registry or that the default registry is null`；两种写法等价，放 configuration 是为了让 `vcpkg.json` 只管依赖。
   **`ports/` 删除**：删前逐文件对比过 registry 仓（`diff -r` 无差异，registry 还多 `ports/pylai`），端口此后只在 registry 仓维护。
