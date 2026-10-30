@@ -6,12 +6,8 @@
             "features": ["log"]
         },
         {
-            "name": "liburing",
-            "platform": "linux"
-        },
-        {
             "name": "asio",
-            "features": ["ssl"]
+            "features": ["ssl", "io-uring"]
         },
         "llhttp",
         "plf-hive"

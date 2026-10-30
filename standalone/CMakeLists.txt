@@ -3,12 +3,16 @@ option(PYLAI_ASIO_MODULE "Build the standalone ASIO module" OFF)
 file(GLOB_RECURSE ASIO_SOURCES CONFIGURE_DEPENDS *.cpp)
 
 add_library(asio-standalone STATIC ${ASIO_SOURCES})
-target_link_libraries(asio-standalone PUBLIC 
+target_link_libraries(asio-standalone PUBLIC
     asio::asio
-    OpenSSL::SSL 
-    OpenSSL::Crypto 
-    ${ASIO_PLATFORM_LIBS}
+    OpenSSL::SSL
+    OpenSSL::Crypto
 )
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # PkgConfig::liburing 由 buildsystem/deps.cmake 发现。
+    target_link_libraries(asio-standalone PUBLIC PkgConfig::liburing)
+endif()
 target_compile_definitions(asio-standalone PUBLIC
     ASIO_SEPARATE_COMPILATION=1
     ASIO_NO_DEPRECATED=1

@@ -20,6 +20,12 @@
 
 ## 阶段 1 · 框架形态定形
 
+- **2026-10-30 · S1-R25 · asio 拆成 standalone 静态库 + 模块导入；liburing 归属移进 registry 的 asio 端口** ✅ —— 起点是分编译 TU 下 asio 把环境判成“无线程”（`detail/config.hpp` 只在 `_MT` / `__MT__` 可见时才开 `ASIO_HAS_THREADS`，而分离编译单元只 include `<asio/impl/src.hpp>`，mingw-w64 的 `_MT` 尚未被 CRT 头带出来），`service_registry` 布局两端不一致、首次连接即崩。
+  **改动**：asio 从 `server/` 移到 `standalone/` 静态库，模块经 `FILE_SET CXX_MODULES` 提供（`asio` / `asio.ssl` / `asio.experimental`）；钉死 `ASIO_HAS_THREADS=1`，关掉 `ASIO_DISABLE_BOOST_CONTEXT_FIBER`；`liburing` 不再由 pylai 直写，改请求 `asio[ssl,io-uring]`（registry 给该端口加 `io-uring` feature，`port-version` 1 → 2），Linux 链接在 `standalone/CMakeLists.txt` 用 `PkgConfig::liburing` 显式补上（此前引用的 `${ASIO_PLATFORM_LIBS}` 全仓无人定义）。
+  **验证**：`cmake --preset msys2` 与 `cmake --build --preset msys2-debug` 退出码 0，`python tests/run.py` ALL PASS（30 条）。
+  **未验证**：Linux 侧本轮没跑（`PkgConfig::liburing` 与 io_uring 后端仍只有历史验证）；Release 预设未测。
+  **复核**：`grep -rn "ASIO_HAS_THREADS\|PkgConfig::liburing" standalone/CMakeLists.txt`；joker-registry 仓 `git log --oneline -- ports/asio` 能看到 `asio 1.38.2#2`。
+
 - **2026-10-27 · S1-R24 · 新增 `ByteResponse`；反代设施的归属成文** 🟡 —— 起点是“HTTP server 的常见用途之一是反代 / 应用网关”。结论按“**框架给设施、不给成品**”收敛，判据与缺口清单见 `docs/proxy.md`。
   **代码**：`route::ByteResponse` 补上“定长 + 多块”这一格 —— chunked 侧（`UnknownLengthResponse::flush` 每次发一块）本来就能反复 flush，缺的是“长度先知道、内容边产边发”。长度由调用方声明，多写 / 少写 / 未声明都由 `logic_error` 拦（`Content-Length` 一发出就补不回来）。状态仍住 `http::ResponseState`（新增 `declared_length` / `sent_bytes`），不另设一份家。
   **未验证**：`jk` 2.6.1 的 `log` 特性要求 `spdlog[fmt,tz-offset,wchar]`，而 spdlog 端口的 `wchar` 是 `"supports": "windows"` ⇒ WSL 上 vcpkg 装不上（triplet 改不了 `supports`，得改 `jk` 端口）。构建因此没跑，见提交 `de47cd4`（message 已注明）。

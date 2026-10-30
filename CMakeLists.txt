@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.28)
-project(pylai VERSION 0.1.8)
+project(pylai VERSION 0.2.0)
 cmake_policy(SET CMP0167 NEW)
 
 set(CMAKE_CXX_STANDARD 23)

@@ -18,8 +18,8 @@ asio 自己会按平台选后端；我们**不定义**跨平台的宏，只在 L
 | 位置 | 做什么 | 判据 |
 |---|---|---|
 | 根 `CMakeLists.txt` | `PkgConfig` 与 `liburing` 只在 **Linux** 查找；MSVC 加 `/utf-8`（源码注释是中文 UTF-8）与 `/Zc:preprocessor`（modules 前提） | `CMAKE_SYSTEM_NAME STREQUAL "Linux"` / `MSVC` |
-| `standalone/CMakeLists.txt` | 按平台拼 `ASIO_PLATFORM_LIBS`；io_uring 的两个宏只在 Linux 定义 | 同上 + `WIN32` |
-| `vcpkg.json` | `liburing` 声明 `"platform": "linux"`（该端口自带 `"supports": "linux"`，不门控会让 Windows 上的 configure 直接失败） | vcpkg manifest 的 platform 表达式 |
+| `standalone/CMakeLists.txt` | Linux 额外链接 `PkgConfig::liburing`；io_uring 的两个宏只在 Linux 定义 | 同上 + `WIN32` |
+| `vcpkg.json` | `liburing` 不再直写，改由 `asio` 的 `io-uring` feature 承载（feature 内的依赖声明为 `"platform": "linux"`） | vcpkg manifest 的 platform 表达式 / 端口 feature |
 
 **代码里没有 `#ifdef _WIN32`** —— `server/` 用的 `asio::signal_set` 本身就是跨平台的：
 Windows 上 Ctrl+C 走 `SIGINT`，`SIGTERM` 不会被触发（不需要特判，只是那条路走不到）。
