@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.28)
-project(pylai VERSION 0.1.7)
+project(pylai VERSION 0.1.8)
 cmake_policy(SET CMP0167 NEW)
 
 set(CMAKE_CXX_STANDARD 23)
@@ -11,7 +11,7 @@ include("buildsystem/deps.cmake")
 
 option(PYLAI_BUILD_TESTS "构建 tests/ 示例应用与端到端验证" ${BUILD_TESTING})
 
-# add_subdirectory(standalone)
+add_subdirectory(standalone)
 add_subdirectory(server)
 if(PYLAI_BUILD_TESTS)
     add_subdirectory(tests)

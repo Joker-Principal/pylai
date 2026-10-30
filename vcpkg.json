@@ -9,10 +9,11 @@
             "name": "liburing",
             "platform": "linux"
         },
-        "asio",
+        {
+            "name": "asio",
+            "features": ["ssl"]
+        },
         "llhttp",
-        "fmt",
-        "spdlog",
         "plf-hive"
     ]
 }

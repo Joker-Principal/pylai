@@ -19,6 +19,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/lib/pkgconfig:$ENV{PKG_CONFIG_PATH}")
     pkg_check_modules(liburing REQUIRED IMPORTED_TARGET liburing)
 endif()
+find_package(OpenSSL CONFIG REQUIRED)
 find_package(asio CONFIG REQUIRED)
 
 find_package(fmt CONFIG REQUIRED)
