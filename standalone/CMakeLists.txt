@@ -1,16 +1,18 @@
-option(PYLAI_ASIO_MODULE "Build the standalone ASIO module" OFF)
-
 file(GLOB_RECURSE ASIO_SOURCES CONFIGURE_DEPENDS *.cpp)
+file(GLOB_RECURSE ASIO_MODULES CONFIGURE_DEPENDS *.cppm)
 
 add_library(asio-standalone STATIC ${ASIO_SOURCES})
+target_sources(asio-standalone PUBLIC
+    FILE_SET asio_set TYPE CXX_MODULES
+    BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}"
+    FILES ${ASIO_MODULES}
+)
 target_link_libraries(asio-standalone PUBLIC
     asio::asio
     OpenSSL::SSL
     OpenSSL::Crypto
 )
-
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    # PkgConfig::liburing 由 buildsystem/deps.cmake 发现。
     target_link_libraries(asio-standalone PUBLIC PkgConfig::liburing)
 endif()
 target_compile_definitions(asio-standalone PUBLIC
@@ -23,21 +25,8 @@ target_compile_definitions(asio-standalone PUBLIC
     $<$<PLATFORM_ID:Windows>:_WIN32_WINNT=0x0A00>
 )
 
-if(PYLAI_ASIO_MODULE)
-    file(GLOB_RECURSE ASIO_MODULES CONFIGURE_DEPENDS *.cppm)
-    target_sources(asio-standalone PUBLIC
-        FILE_SET asio_set TYPE CXX_MODULES
-        BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}"
-        FILES ${ASIO_MODULES}
-    )
-    install(TARGETS asio-standalone
-        EXPORT pylaiTargets
-        ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
-        FILE_SET asio_set DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/asio-standalone"
-    )
-else()
-    install(TARGETS asio-standalone
-        EXPORT pylaiTargets
-        ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
-    )
-endif()
+install(TARGETS asio-standalone
+    EXPORT pylaiTargets
+    ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+    FILE_SET asio_set DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/asio-standalone"
+)
